@@ -2,11 +2,11 @@ extern crate nalgebra_glm as glm;
 extern crate tinyfiledialogs as tfd;
 extern crate ozy_engine as ozy;
 
+use sqlite::State;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
-use std::os;
-use glfw::{Action, Context, MouseButton, WindowEvent, WindowMode};
+use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowMode};
 use imgui::{Condition, DrawCmd, FontAtlasRefMut, TextureId, im_str};
 use ozy::glutil;
 use ozy::render::clip_from_screen;
@@ -138,6 +138,22 @@ fn main() {
         sqlite::open(db_name).unwrap()
     };
 
+    let tags = {
+        let mut tag_statement = connection.prepare(
+            "
+            SELECT name FROM tags;
+            "
+        ).unwrap();
+
+        let mut ts = Vec::new();
+        while let State::Row = tag_statement.next().unwrap() {
+            let the_string = tag_statement.read::<String>(0).unwrap();
+            println!("name = {}", the_string);
+            ts.push(the_string);
+        }
+        ts
+    };
+
     let mut open_images: Vec<OpenImage> = vec![];
 
     while !window.should_close() {
@@ -183,6 +199,18 @@ fn main() {
                     imgui_io.mouse_wheel = y as f32;
                     imgui_io.mouse_wheel_h = x as f32;
                 }
+                WindowEvent::Key(key, _, action, ..) => {
+                    if key == Key::A {
+                        imgui_io.key_map[imgui::Key::A as usize] = Key::A as u32;
+                        if action == Action::Press {
+                            println!("Pushing A");
+                            imgui_io.keys_down[Key::A as usize] = true;
+                        } else if action == Action::Release {        
+                            println!("Releasing A");                    
+                            imgui_io.keys_down[Key::A as usize] = false;
+                        }
+                    }
+                }
                 _ => { println!("Unhandled event: {:?}", event); }
             }
         }
@@ -195,7 +223,7 @@ fn main() {
                             .collapsible(false)
                             .title_bar(false)
                             .begin(&imgui_ui) {
-
+            
             let mut remove_idx = None;
             for i in 0..open_images.len() {
                 let im = &open_images[i];
@@ -206,7 +234,9 @@ fn main() {
                 } else {
                     1.0
                 };
-                imgui::Image::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui);
+                if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
+                    println!("Clicked on {}", im.name);
+                }
                 imgui_ui.same_line(0.0);
                 imgui_ui.text(&im.name);
 
@@ -223,6 +253,12 @@ fn main() {
                     remove_idx = Some(i);
                 }
 
+                let mut new_tag_buffer = imgui::ImString::with_capacity(128);
+                if imgui::InputText::new(&imgui_ui, im_str!("Add new tag"), &mut new_tag_buffer).chars_uppercase(true).build() {
+                    println!("Typing");
+                }
+                imgui_ui.separator();
+
                 //Popping the extra id info from Dear Imgui's stack
                 id_stack_token.pop(&imgui_ui);
             }
@@ -231,8 +267,8 @@ fn main() {
             }
 
             imgui_ui.separator();
-                            
-            if imgui_ui.button(im_str!("Open image"), [0.0, 32.0]) {
+            
+            if imgui_ui.button(im_str!("Open images"), [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
                         println!("Trying to load: {}", path);
@@ -241,7 +277,7 @@ fn main() {
                         let width = image_data.width;
                         let image_gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
                         println!("Loaded successfully.");
-
+    
                         let o = OpenImage {
                             name: path,
                             gl_name: image_gl_name,
@@ -253,7 +289,7 @@ fn main() {
                 }
             }
             imgui_ui.same_line(0.0);
-
+    
             if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
                 window.set_should_close(true);
             }
