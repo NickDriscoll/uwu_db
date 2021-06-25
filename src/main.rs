@@ -19,10 +19,25 @@ const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
 ];
 
 struct OpenImage {
+    name: String,
     gl_name: GLuint,
     width: usize,
     height: usize
 }
+
+/*
+Probably the prepared statements to use:
+
+SELECT name FROM tags;
+
+SELECT path FROM images
+JOIN
+  (SELECT image_id FROM image_tags
+  WHERE image_tags.tag_id = (
+        SELECT id FROM tags WHERE name="persona"
+      ))
+WHERE id=image_id;
+*/
 
 fn main() {
     let mut window_size = glm::vec2(1080, 1080);
@@ -121,7 +136,7 @@ fn main() {
         sqlite::open(db_name).unwrap()
     };
 
-    let mut open_images = vec![];
+    let mut open_images: Vec<OpenImage> = vec![];
 
     while !window.should_close() {
         let imgui_io = imgui_context.io_mut();
@@ -176,29 +191,56 @@ fn main() {
                             .size([window_size.x as f32, window_size.y as f32], Condition::Always)
                             .resizable(false)
                             .collapsible(false)
+                            .title_bar(false)
                             .begin(&imgui_ui) {
-
-            //by the magic
-            if imgui_ui.button(im_str!("Open image"), [0.0, 32.0]) {
-                if let Some(image_path) = tfd::open_file_dialog("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], "idk"))) {
-                    let image_data = glutil::image_data_from_path(&image_path, glutil::ColorSpace::Gamma);
-                    let height = image_data.height;
-                    let width = image_data.width;
-                    let image_gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
-
-                    let o = OpenImage {
-                        gl_name: image_gl_name,
-                        width: width as usize,
-                        height: height as usize
-                    };
-                    open_images.push(o);
-                }
-            }
-            imgui_ui.separator();
 
             for i in 0..open_images.len() {
                 let im = &open_images[i];
-                imgui::Image::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 / 2.0, im.height as f32 / 2.0]).build(&imgui_ui);
+
+                let max_width = window_size.x / 2;
+                let factor = if im.width > max_width as usize {
+                    max_width as f32 / im.width as f32
+                } else {
+                    1.0
+                };
+                imgui::Image::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui);
+                imgui_ui.same_line(0.0);
+                imgui_ui.text(&im.name);
+
+                if imgui_ui.button(im_str!("Set tags"), [0.0, 32.0]) {
+                }
+                imgui_ui.same_line(0.0);
+
+                if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
+
+                }
+            }
+            imgui_ui.separator();
+                            
+            if imgui_ui.button(im_str!("Open image"), [0.0, 32.0]) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                    for path in image_paths {
+                        println!("Trying to load: {}", path);
+                        let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
+                        let height = image_data.height;
+                        let width = image_data.width;
+                        let image_gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
+                        println!("Loaded successfully.");
+
+                        let o = OpenImage {
+                            name: path,
+                            gl_name: image_gl_name,
+                            width: width as usize,
+                            height: height as usize
+                        };
+                        open_images.push(o);
+                    }
+                }
+            }
+            imgui_ui.same_line(0.0);
+
+            if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
+                window.set_should_close(true);
             }
 
             token.end(&imgui_ui);
@@ -207,6 +249,7 @@ fn main() {
         //Rendering Dear IMGUI
         unsafe {
             gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::Viewport(0, 0, window_size.x as GLint, window_size.y as GLint);
             gl::UseProgram(imgui_program);
             glutil::bind_matrix4(imgui_program, "projection", &clip_from_screen(window_size));
             {
