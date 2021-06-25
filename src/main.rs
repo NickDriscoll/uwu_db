@@ -5,6 +5,7 @@ extern crate ozy_engine as ozy;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
+use std::os;
 use glfw::{Action, Context, MouseButton, WindowEvent, WindowMode};
 use imgui::{Condition, DrawCmd, FontAtlasRefMut, TextureId, im_str};
 use ozy::glutil;
@@ -123,6 +124,7 @@ fn main() {
     let connection = if !Path::new(db_name).exists() {
         let con = sqlite::open(db_name).unwrap();
         
+        //Initialize the tables
         con.execute(
             "
             CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
@@ -194,6 +196,7 @@ fn main() {
                             .title_bar(false)
                             .begin(&imgui_ui) {
 
+            let mut remove_idx = None;
             for i in 0..open_images.len() {
                 let im = &open_images[i];
 
@@ -207,14 +210,26 @@ fn main() {
                 imgui_ui.same_line(0.0);
                 imgui_ui.text(&im.name);
 
+                //We need to push/pop id info for widgets that have the same text name
+                let id_stack_token = imgui_ui.push_id(imgui::Id::Int(i as i32));
+
                 if imgui_ui.button(im_str!("Set tags"), [0.0, 32.0]) {
+                    println!("Tag setting");
                 }
                 imgui_ui.same_line(0.0);
 
                 if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
-
+                    println!("Removing");
+                    remove_idx = Some(i);
                 }
+
+                //Popping the extra id info from Dear Imgui's stack
+                id_stack_token.pop(&imgui_ui);
             }
+            if let Some(idx) = remove_idx {
+                open_images.remove(idx);
+            }
+
             imgui_ui.separator();
                             
             if imgui_ui.button(im_str!("Open image"), [0.0, 32.0]) {
