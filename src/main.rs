@@ -6,11 +6,15 @@ use sqlite::State;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
-use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowMode};
-use imgui::{Condition, DrawCmd, FontAtlasRefMut, TextureId, im_str};
+use std::thread;
+use std::sync::mpsc;
+use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
+use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, MenuItem, TextureId, im_str};
 use ozy::glutil;
-use ozy::render::clip_from_screen;
+use ozy::render::{clip_from_screen};
+use ozy::structs::ImageData;
 use gl::types::*;
+use tfd::MessageBoxIcon;
 
 const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_WRAP_S, gl::REPEAT),
@@ -26,8 +30,41 @@ struct OpenImage {
     height: usize
 }
 
+impl OpenImage {
+    fn from_path(path: String) -> Self {
+        println!("Trying to load: {}", path);
+        let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
+        let height = image_data.height;
+        let width = image_data.width;
+        let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
+        println!("Loaded successfully.");
+        OpenImage {
+            name: path,
+            gl_name,
+            width: width as usize,
+            height: height as usize
+        }
+    }
+
+    fn from_imagedata(image_data: ImageData, path: String) -> Self {
+        let height = image_data.height;
+        let width = image_data.width;
+        let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
+        OpenImage {
+            name: path,
+            gl_name,
+            width: width as usize,
+            height: height as usize 
+        }
+    }
+}
+
+fn load_openimage(open_images: &mut Vec<OpenImage>, path: String) {
+    open_images.push(OpenImage::from_path(path));
+}
+
 /*
-Probably the prepared statements to use:
+Prepared statements for later:
 
 SELECT name FROM tags;
 
@@ -51,12 +88,15 @@ fn main() {
             return;
         }
     };
+    glfw.window_hint(WindowHint::RefreshRate(Some(60)));
     let (mut window, events) = glfw.create_window(window_size.x, window_size.y, "uwu_db", WindowMode::Windowed).unwrap();
     window.set_key_polling(true);
     window.set_mouse_button_polling(true);
     window.set_cursor_pos_polling(true);
     window.set_scroll_polling(true);
     window.set_framebuffer_size_polling(true);
+    window.set_drag_and_drop_polling(true);
+    window.set_char_polling(true);
 
     //Load OpenGL functions
     gl::load_with(|symbol| window.get_proc_address(symbol));
@@ -81,18 +121,48 @@ fn main() {
     let imgui_program = match glutil::compile_program_from_files("shaders/imgui.vert", "shaders/imgui.frag") {
         Ok(shader) => { shader }
         Err(e) => {
-            println!("Error compiling shader: {}", e);
+            tfd::message_box_ok("GLSL compilation error", &format!("Unable to compile the GL shader:\n{}", e), MessageBoxIcon::Error);
             exit(-1);
         }
     };
     
     //Creating Dear ImGui context
     let mut imgui_context = imgui::Context::create();
-    imgui_context.style_mut().use_dark_colors();
+
+    //Imgui IO init
     {
         let io = imgui_context.io_mut();
         io.display_size[0] = window.get_size().0 as f32;
         io.display_size[1] = window.get_size().1 as f32;
+
+        //Set up keyboard map
+        io.key_map[imgui::Key::Tab as usize] = Key::Tab as u32;
+        io.key_map[imgui::Key::LeftArrow as usize] = Key::Left as u32;
+        io.key_map[imgui::Key::RightArrow as usize] = Key::Right as u32;
+        io.key_map[imgui::Key::UpArrow as usize] = Key::Up as u32;
+        io.key_map[imgui::Key::DownArrow as usize] = Key::Down as u32;
+        io.key_map[imgui::Key::PageDown as usize] = Key::PageDown as u32;
+        io.key_map[imgui::Key::PageUp as usize] = Key::PageUp as u32;
+        io.key_map[imgui::Key::Home as usize] = Key::Home as u32;
+        io.key_map[imgui::Key::End as usize] = Key::End as u32;
+        io.key_map[imgui::Key::Insert as usize] = Key::Insert as u32;
+        io.key_map[imgui::Key::Delete as usize] = Key::Delete as u32;
+        io.key_map[imgui::Key::Backspace as usize] = Key::Backspace as u32;
+        io.key_map[imgui::Key::Space as usize] = Key::Space as u32;
+        io.key_map[imgui::Key::Enter as usize] = Key::Enter as u32;
+        io.key_map[imgui::Key::KeyPadEnter as usize] = Key::KpEnter as u32;
+        io.key_map[imgui::Key::A as usize] = Key::A as u32;
+        io.key_map[imgui::Key::C as usize] = Key::C as u32;
+        io.key_map[imgui::Key::V as usize] = Key::V as u32;
+        io.key_map[imgui::Key::X as usize] = Key::X as u32;
+        io.key_map[imgui::Key::Y as usize] = Key::Y as u32;
+        io.key_map[imgui::Key::Z as usize] = Key::Z as u32;
+    }
+
+    //Imgui style init
+    {
+        let style = imgui_context.style_mut();
+        style.use_dark_colors();
     }
 
     //Create and upload Dear IMGUI font atlas
@@ -153,8 +223,23 @@ fn main() {
         }
         ts
     };
+    println!("{:?}", tags);
 
     let mut open_images: Vec<OpenImage> = vec![];
+    let mut text_buffer = imgui::ImString::with_capacity(256);
+    let mut selected_tag = 0;
+    //let mut selected_image = None;
+
+    let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
+    let (openimage_tx, openimage_rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            while let Ok(path) = path_rx.try_recv() {
+                let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
+                openimage_tx.send((image_data, path)).unwrap();
+            }
+        }
+    });
 
     while !window.should_close() {
         let imgui_io = imgui_context.io_mut();
@@ -200,35 +285,103 @@ fn main() {
                     imgui_io.mouse_wheel_h = x as f32;
                 }
                 WindowEvent::Key(key, _, action, ..) => {
-                    if key == Key::A {
-                        imgui_io.key_map[imgui::Key::A as usize] = Key::A as u32;
-                        if action == Action::Press {
-                            println!("Pushing A");
-                            imgui_io.keys_down[Key::A as usize] = true;
-                        } else if action == Action::Release {        
-                            println!("Releasing A");                    
-                            imgui_io.keys_down[Key::A as usize] = false;
-                        }
+                    if action == Action::Press {
+                        imgui_io.keys_down[key as usize] = true;
+                    } else if action == Action::Release {
+                        imgui_io.keys_down[key as usize] = false;
+                    }
+                }
+                WindowEvent::Char(c) => {
+                    imgui_io.add_input_character(c);
+                }
+                WindowEvent::FileDrop(file_paths) => {
+                    for path in file_paths {
+                        /*
+                        let path_str = String::from(path.to_str().unwrap());
+                        load_openimage(&m]ut open_images, path_str);
+                        */                
+                        let s = String::from(path.to_str().unwrap());
+                        path_tx.send(s).unwrap();
                     }
                 }
                 _ => { println!("Unhandled event: {:?}", event); }
             }
         }
 
+        //Set mod keys for this frame
+        imgui_io.key_ctrl = imgui_io.keys_down[Key::LeftControl as usize] || imgui_io.keys_down[Key::RightControl as usize];
+        imgui_io.key_shift = imgui_io.keys_down[Key::LeftShift as usize] || imgui_io.keys_down[Key::RightShift as usize];
+        imgui_io.key_alt = imgui_io.keys_down[Key::LeftAlt as usize] || imgui_io.keys_down[Key::RightAlt as usize];        
+
+        //Begin Imgui drawing
         let imgui_ui = imgui_context.frame();
+
+        //Receive images from the image loading thread
+        while let Ok((image, path)) = openimage_rx.try_recv() {
+            let o = OpenImage::from_imagedata(image, path);
+            open_images.push(o);
+        }
+
+        let menu_height = 50.0;
+        if let Some(token) = imgui::Window::new(im_str!("menu"))
+                             .position([0.0, 0.0], Condition::Always)
+                             .size([window_size.x as f32, menu_height], Condition::Always)
+                             .resizable(false)
+                             .collapsible(false)
+                             .title_bar(false)
+                             .begin(&imgui_ui) {
+            
+            imgui::ComboBox::new(im_str!("Thing")).build_simple_string(&imgui_ui, &mut selected_tag, &[im_str!("A"), im_str!("fucking"), im_str!("list")]);
+            imgui_ui.same_line(0.0);
+                                
+            if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                    for path in image_paths {
+                        if let Err(e) = path_tx.send(path) {
+                            println!("{}", e);
+                        }
+                        //load_openimage(&mut open_images, path);
+                    }
+                }
+            }
+            imgui_ui.same_line(0.0);
+            
+            if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
+                window.set_should_close(true);
+            }
+            /*
+            imgui_ui.separator();
+
+            imgui::InputText::new(&imgui_ui, im_str!("Plz"), &mut text_buffer).build();
+            imgui_ui.same_line(0.0);
+            imgui_ui.button(im_str!("Submit"), [0.0, 32.0]);
+            */
+
+            token.end(&imgui_ui);
+        }
+
+        //Draw main window where images are displayed
         if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
-                            .position([0.0, 0.0], Condition::Always)
-                            .size([window_size.x as f32, window_size.y as f32], Condition::Always)
+                            .position([0.0, menu_height], Condition::Always)
+                            .size([window_size.x as f32, window_size.y as f32 - menu_height], Condition::Always)
                             .resizable(false)
                             .collapsible(false)
                             .title_bar(false)
+                            .horizontal_scrollbar(true)
+                            //.menu_bar(true)
                             .begin(&imgui_ui) {
-            
-            let mut remove_idx = None;
+
+            if false {
+                imgui_ui.set_scroll_y(imgui_ui.scroll_y() + 1.0);
+                if imgui_ui.scroll_y() >= imgui_ui.scroll_max_y() {
+                    imgui_ui.set_scroll_y(0.0);
+                }
+            }
+
+            let pics_per_row = 4;
             for i in 0..open_images.len() {
                 let im = &open_images[i];
-
-                let max_width = window_size.x / 2;
+                let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
                 let factor = if im.width > max_width as usize {
                     max_width as f32 / im.width as f32
                 } else {
@@ -238,60 +391,9 @@ fn main() {
                     println!("Clicked on {}", im.name);
                 }
                 imgui_ui.same_line(0.0);
-                imgui_ui.text(&im.name);
-
-                //We need to push/pop id info for widgets that have the same text name
-                let id_stack_token = imgui_ui.push_id(imgui::Id::Int(i as i32));
-
-                if imgui_ui.button(im_str!("Set tags"), [0.0, 32.0]) {
-                    println!("Tag setting");
+                if i % pics_per_row == pics_per_row - 1 {
+                    imgui_ui.new_line();
                 }
-                imgui_ui.same_line(0.0);
-
-                if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
-                    println!("Removing");
-                    remove_idx = Some(i);
-                }
-
-                let mut new_tag_buffer = imgui::ImString::with_capacity(128);
-                if imgui::InputText::new(&imgui_ui, im_str!("Add new tag"), &mut new_tag_buffer).chars_uppercase(true).build() {
-                    println!("Typing");
-                }
-                imgui_ui.separator();
-
-                //Popping the extra id info from Dear Imgui's stack
-                id_stack_token.pop(&imgui_ui);
-            }
-            if let Some(idx) = remove_idx {
-                open_images.remove(idx);
-            }
-
-            imgui_ui.separator();
-            
-            if imgui_ui.button(im_str!("Open images"), [0.0, 32.0]) {
-                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
-                    for path in image_paths {
-                        println!("Trying to load: {}", path);
-                        let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
-                        let height = image_data.height;
-                        let width = image_data.width;
-                        let image_gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
-                        println!("Loaded successfully.");
-    
-                        let o = OpenImage {
-                            name: path,
-                            gl_name: image_gl_name,
-                            width: width as usize,
-                            height: height as usize
-                        };
-                        open_images.push(o);
-                    }
-                }
-            }
-            imgui_ui.same_line(0.0);
-    
-            if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
-                window.set_should_close(true);
             }
 
             token.end(&imgui_ui);
