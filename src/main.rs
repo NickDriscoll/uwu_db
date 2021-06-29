@@ -105,7 +105,8 @@ fn main() {
     unsafe {        
 		gl::Enable(gl::FRAMEBUFFER_SRGB); 								//Enable automatic linear->SRGB space conversion
         gl::Enable(gl::BLEND);											//Enable alpha blending
-		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
+        gl::Enable(gl::SCISSOR_TEST);
+		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))        
         
         #[cfg(gloutput)]
 		{
@@ -200,6 +201,8 @@ fn main() {
             CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
+
+            INSERT INTO tags (name) VALUES (\"persona\");
             "
         ).unwrap();
         
@@ -217,8 +220,7 @@ fn main() {
 
         let mut ts = Vec::new();
         while let State::Row = tag_statement.next().unwrap() {
-            let the_string = tag_statement.read::<String>(0).unwrap();
-            println!("name = {}", the_string);
+            let the_string = tag_statement.read::<String>(0).unwrap();            
             ts.push(the_string);
         }
         ts
@@ -226,9 +228,10 @@ fn main() {
     println!("{:?}", tags);
 
     let mut open_images: Vec<OpenImage> = vec![];
-    let mut text_buffer = imgui::ImString::with_capacity(256);
+    let mut text_buffer = imgui::ImString::with_capacity(256);    
+    //let mut tags = Vec::new();
     let mut selected_tag = 0;
-    //let mut selected_image = None;
+    let mut selected_image = None;
 
     let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
     let (openimage_tx, openimage_rx) = mpsc::channel();
@@ -296,10 +299,6 @@ fn main() {
                 }
                 WindowEvent::FileDrop(file_paths) => {
                     for path in file_paths {
-                        /*
-                        let path_str = String::from(path.to_str().unwrap());
-                        load_openimage(&m]ut open_images, path_str);
-                        */                
                         let s = String::from(path.to_str().unwrap());
                         path_tx.send(s).unwrap();
                     }
@@ -331,7 +330,7 @@ fn main() {
                              .title_bar(false)
                              .begin(&imgui_ui) {
             
-            imgui::ComboBox::new(im_str!("Thing")).build_simple_string(&imgui_ui, &mut selected_tag, &[im_str!("A"), im_str!("fucking"), im_str!("list")]);
+            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, &[im_str!("A"), im_str!("fucking"), im_str!("list")]);
             imgui_ui.same_line(0.0);
                                 
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
@@ -349,13 +348,6 @@ fn main() {
             if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
                 window.set_should_close(true);
             }
-            /*
-            imgui_ui.separator();
-
-            imgui::InputText::new(&imgui_ui, im_str!("Plz"), &mut text_buffer).build();
-            imgui_ui.same_line(0.0);
-            imgui_ui.button(im_str!("Submit"), [0.0, 32.0]);
-            */
 
             token.end(&imgui_ui);
         }
@@ -389,6 +381,7 @@ fn main() {
                 };
                 if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
                     println!("Clicked on {}", im.name);
+                    selected_image = Some(i);
                 }
                 imgui_ui.same_line(0.0);
                 if i % pics_per_row == pics_per_row - 1 {
@@ -397,6 +390,20 @@ fn main() {
             }
 
             token.end(&imgui_ui);
+        }
+
+        if let Some(image) = selected_image {
+            let im = &open_images[image];
+            if let Some(token) = imgui::Window::new(im_str!("Image control panel")).begin(&imgui_ui) {
+                if !imgui_ui.is_window_focused() {
+                    selected_image = None;
+                }
+
+                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut text_buffer).build();
+                imgui_ui.button(im_str!("Submit"), [0.0, 32.0]);
+
+                token.end(&imgui_ui);
+            }
         }
 
         //Rendering Dear IMGUI
