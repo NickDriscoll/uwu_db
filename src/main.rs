@@ -9,7 +9,7 @@ use std::process::{exit};
 use std::thread;
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImString, MenuItem, TextureId, im_str};
+use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use ozy::structs::ImageData;
@@ -40,6 +40,14 @@ JOIN
       ))
 WHERE id=image_id;
 */
+
+fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {    
+    let mut tag_refs = Vec::with_capacity(strs.len());
+    for t in strs {
+        tag_refs.push(t);
+    }
+    tag_refs
+}
 
 fn main() {
     let mut window_size = glm::vec2(1080, 1080);
@@ -197,6 +205,7 @@ fn main() {
     let mut control_panel_tag = 0;
     let mut selected_image = None;
     let mut pics_per_row = 3;
+    let mut auto_scroll = false;
 
     let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
     let (openimage_tx, openimage_rx) = mpsc::channel();
@@ -293,11 +302,8 @@ fn main() {
                              .title_bar(false)
                              .begin(&imgui_ui) {
             
-            let mut tag_refs = Vec::with_capacity(tags.len());
-            for t in &tags {
-                tag_refs.push(t);
-            }
-            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, tag_refs.as_slice());
+            imgui_ui.set_next_item_width(200.0);
+            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice());
             imgui_ui.same_line(0.0);
                                 
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
@@ -313,6 +319,11 @@ fn main() {
                                 
             if imgui_ui.button(im_str!("Clear images"), [0.0, 32.0]) {
                 open_images.clear();
+            }
+            imgui_ui.same_line(0.0);
+                                
+            if imgui_ui.button(im_str!("Toggle scrolling"), [0.0, 32.0]) {
+                auto_scroll = !auto_scroll;
             }
             imgui_ui.same_line(0.0);
             
@@ -335,7 +346,7 @@ fn main() {
                             //.menu_bar(true)
                             .begin(&imgui_ui) {
 
-            if false {
+            if auto_scroll {
                 imgui_ui.set_scroll_y(imgui_ui.scroll_y() + 1.0);
                 if imgui_ui.scroll_y() >= imgui_ui.scroll_max_y() {
                     imgui_ui.set_scroll_y(0.0);
@@ -368,7 +379,7 @@ fn main() {
                 *selected_image = None;
             }
 
-            let im = &open_images[image];
+            let im = &mut open_images[image];
             let mut to_remove = None;
             if let Some(token) = imgui::Window::new(im_str!("Image control panel"))
                                  .collapsible(false)
@@ -380,8 +391,8 @@ fn main() {
 
                 imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
                 
-                if imgui_ui.button(im_str!("Add new tag"), [0.0, 32.0]) {
-                    
+                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
+
                 }
 
                 if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
@@ -390,7 +401,17 @@ fn main() {
                 }
                 imgui_ui.separator();
 
-                imgui::ComboBox::new(im_str!("Extant tags")).build_simple_string(&imgui_ui, &mut control_panel_tag, im.tags.as_slice());
+                imgui_ui.set_next_item_width(200.0);
+                imgui::ComboBox::new(im_str!("Extant tags")).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
+                if imgui_ui.button(im_str!("Apply tag to image"), [0.0, 32.0]) {
+                    im.tags.push(&tags[control_panel_tag])
+                }
+                imgui_ui.separator();
+
+                imgui_ui.text(im_str!("Click on a tag to remove it from this image:"));
+                for tag in &im.tags {
+                    imgui_ui.checkbox(tag, &mut true);
+                }
 
                 token.end(&imgui_ui);
             }
