@@ -9,12 +9,16 @@ use std::process::{exit};
 use std::thread;
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, MenuItem, TextureId, im_str};
+use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImString, MenuItem, TextureId, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use ozy::structs::ImageData;
 use gl::types::*;
 use tfd::MessageBoxIcon;
+
+use crate::structs::OpenImage;
+
+mod structs;
 
 const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_WRAP_S, gl::REPEAT),
@@ -22,46 +26,6 @@ const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_MIN_FILTER, gl::LINEAR),
     (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
 ];
-
-struct OpenImage {
-    name: String,
-    gl_name: GLuint,
-    width: usize,
-    height: usize
-}
-
-impl OpenImage {
-    fn from_path(path: String) -> Self {
-        println!("Trying to load: {}", path);
-        let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
-        let height = image_data.height;
-        let width = image_data.width;
-        let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
-        println!("Loaded successfully.");
-        OpenImage {
-            name: path,
-            gl_name,
-            width: width as usize,
-            height: height as usize
-        }
-    }
-
-    fn from_imagedata(image_data: ImageData, path: String) -> Self {
-        let height = image_data.height;
-        let width = image_data.width;
-        let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
-        OpenImage {
-            name: path,
-            gl_name,
-            width: width as usize,
-            height: height as usize 
-        }
-    }
-}
-
-fn load_openimage(open_images: &mut Vec<OpenImage>, path: String) {
-    open_images.push(OpenImage::from_path(path));
-}
 
 /*
 Prepared statements for later:
@@ -169,7 +133,6 @@ fn main() {
     //Create and upload Dear IMGUI font atlas
     match imgui_context.fonts() {
         FontAtlasRefMut::Owned(atlas) => unsafe {
-            let mut tex = 0;
             let font_atlas = atlas.build_rgba32_texture();
 
             let tex_params = [
@@ -179,6 +142,7 @@ fn main() {
                 (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
             ];
 
+            let mut tex = 0;
             gl::GenTextures(1, &mut tex);
             gl::BindTexture(gl::TEXTURE_2D, tex);            
             glutil::apply_texture_parameters(&tex_params);
@@ -201,15 +165,16 @@ fn main() {
             CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
-
-            INSERT INTO tags (name) VALUES (\"persona\");
+            
+            INSERT INTO tags (name) VALUES (\"Persona\");
             "
         ).unwrap();
         
         con
-    } else {
-        sqlite::open(db_name).unwrap()
-    };
+    } else { sqlite::open(db_name).unwrap() };
+    let new_tag_statement = connection.prepare("
+        INSERT INTO tags (name) VALUES (?)
+    ").unwrap();
 
     let tags = {
         let mut tag_statement = connection.prepare(
@@ -220,27 +185,25 @@ fn main() {
 
         let mut ts = Vec::new();
         while let State::Row = tag_statement.next().unwrap() {
-            let the_string = tag_statement.read::<String>(0).unwrap();            
-            ts.push(the_string);
+            let the_string = tag_statement.read::<String>(0).unwrap();
+            ts.push(im_str!("{}", the_string));
         }
         ts
     };
-    println!("{:?}", tags);
 
     let mut open_images: Vec<OpenImage> = vec![];
-    let mut text_buffer = imgui::ImString::with_capacity(256);    
-    //let mut tags = Vec::new();
+    let mut new_tag_buffer = imgui::ImString::with_capacity(256);
     let mut selected_tag = 0;
+    let mut control_panel_tag = 0;
     let mut selected_image = None;
+    let mut pics_per_row = 3;
 
     let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
     let (openimage_tx, openimage_rx) = mpsc::channel();
     thread::spawn(move || {
-        loop {
-            while let Ok(path) = path_rx.try_recv() {
-                let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
-                openimage_tx.send((image_data, path)).unwrap();
-            }
+        while let Ok(path) = path_rx.recv() {
+            let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
+            openimage_tx.send((image_data, path)).unwrap();
         }
     });
 
@@ -330,18 +293,26 @@ fn main() {
                              .title_bar(false)
                              .begin(&imgui_ui) {
             
-            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, &[im_str!("A"), im_str!("fucking"), im_str!("list")]);
+            let mut tag_refs = Vec::with_capacity(tags.len());
+            for t in &tags {
+                tag_refs.push(t);
+            }
+            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, tag_refs.as_slice());
             imgui_ui.same_line(0.0);
                                 
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
-                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:\\images\\", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:/images/", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
                         if let Err(e) = path_tx.send(path) {
                             println!("{}", e);
                         }
-                        //load_openimage(&mut open_images, path);
                     }
                 }
+            }
+            imgui_ui.same_line(0.0);
+                                
+            if imgui_ui.button(im_str!("Clear images"), [0.0, 32.0]) {
+                open_images.clear();
             }
             imgui_ui.same_line(0.0);
             
@@ -353,6 +324,7 @@ fn main() {
         }
 
         //Draw main window where images are displayed
+        let mut focus_control_panel = false;
         if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
                             .position([0.0, menu_height], Condition::Always)
                             .size([window_size.x as f32, window_size.y as f32 - menu_height], Condition::Always)
@@ -370,7 +342,6 @@ fn main() {
                 }
             }
 
-            let pics_per_row = 4;
             for i in 0..open_images.len() {
                 let im = &open_images[i];
                 let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
@@ -380,8 +351,8 @@ fn main() {
                     1.0
                 };
                 if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
-                    println!("Clicked on {}", im.name);
                     selected_image = Some(i);
+                    focus_control_panel = true;
                 }
                 imgui_ui.same_line(0.0);
                 if i % pics_per_row == pics_per_row - 1 {
@@ -393,16 +364,38 @@ fn main() {
         }
 
         if let Some(image) = selected_image {
+            fn close_window(selected_image: &mut Option<usize>) {
+                *selected_image = None;
+            }
+
             let im = &open_images[image];
-            if let Some(token) = imgui::Window::new(im_str!("Image control panel")).begin(&imgui_ui) {
-                if !imgui_ui.is_window_focused() {
-                    selected_image = None;
+            let mut to_remove = None;
+            if let Some(token) = imgui::Window::new(im_str!("Image control panel"))
+                                 .collapsible(false)
+                                 .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)
+                                 .focused(focus_control_panel)
+                                 .begin(&imgui_ui) {
+                imgui_ui.text(im_str!("{}", im.name));
+                imgui_ui.separator();
+
+                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
+                
+                if imgui_ui.button(im_str!("Add new tag"), [0.0, 32.0]) {
+                    
                 }
 
-                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut text_buffer).build();
-                imgui_ui.button(im_str!("Submit"), [0.0, 32.0]);
+                if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
+                    to_remove = Some(image);
+                    close_window(&mut selected_image);
+                }
+                imgui_ui.separator();
+
+                imgui::ComboBox::new(im_str!("Extant tags")).build_simple_string(&imgui_ui, &mut control_panel_tag, im.tags.as_slice());
 
                 token.end(&imgui_ui);
+            }
+            if let Some(index) = to_remove {            
+                open_images.remove(index);
             }
         }
 
