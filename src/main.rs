@@ -7,6 +7,7 @@ use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
 use std::thread;
+use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
 use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, im_str};
@@ -47,6 +48,13 @@ fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {
         tag_refs.push(t);
     }
     tag_refs
+}
+
+fn insert_tag(strs: &mut Vec<ImString>, new_str: &ImString) {                    
+    if !strs.contains(&new_str) {
+        strs.push(new_str.clone());
+        strs.sort();
+    }
 }
 
 fn main() {
@@ -146,8 +154,8 @@ fn main() {
             let tex_params = [
                 (gl::TEXTURE_WRAP_S, gl::REPEAT),
                 (gl::TEXTURE_WRAP_T, gl::REPEAT),
-                (gl::TEXTURE_MIN_FILTER, gl::LINEAR),
-                (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
+                (gl::TEXTURE_MIN_FILTER, gl::NEAREST),
+                (gl::TEXTURE_MAG_FILTER, gl::NEAREST)
             ];
 
             let mut tex = 0;
@@ -180,14 +188,12 @@ fn main() {
         
         con
     } else { sqlite::open(db_name).unwrap() };
-    let new_tag_statement = connection.prepare("
-        INSERT INTO tags (name) VALUES (?)
-    ").unwrap();
 
-    let tags = {
+    //Fetch tags from database
+    let mut tags = {
         let mut tag_statement = connection.prepare(
             "
-            SELECT name FROM tags;
+            SELECT name FROM tags ORDER BY name;
             "
         ).unwrap();
 
@@ -199,6 +205,7 @@ fn main() {
         ts
     };
 
+    let dropdown_width = 150.0;
     let mut open_images: Vec<OpenImage> = vec![];
     let mut new_tag_buffer = imgui::ImString::with_capacity(256);
     let mut selected_tag = 0;
@@ -216,7 +223,15 @@ fn main() {
         }
     });
 
+    let mut frame_timer = ozy::structs::FrameTimer::new();
     while !window.should_close() {
+        let delta_time = {
+            let frame_instant = Instant::now();
+            let dur = frame_instant.duration_since(frame_timer.last_frame_instant);
+            frame_timer.last_frame_instant = frame_instant;
+            dur.as_secs_f32()
+        };        
+
         let imgui_io = imgui_context.io_mut();
 
         glfw.poll_events();
@@ -293,6 +308,7 @@ fn main() {
             open_images.push(o);
         }
 
+        //Top menu
         let menu_height = 50.0;
         if let Some(token) = imgui::Window::new(im_str!("menu"))
                              .position([0.0, 0.0], Condition::Always)
@@ -301,11 +317,21 @@ fn main() {
                              .collapsible(false)
                              .title_bar(false)
                              .begin(&imgui_ui) {
+
+            fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<usize>) {
+                *selected_image = None;
+                images.clear();                
+            }
             
-            imgui_ui.set_next_item_width(200.0);
-            imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice());
+            imgui_ui.set_next_item_width(dropdown_width);
+            if imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
+                let tag = &tags[selected_tag];
+                clear_open_images(&mut open_images, &mut selected_image);
+
+                //Bind SQL variables
+            }
             imgui_ui.same_line(0.0);
-                                
+
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:/images/", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
@@ -318,7 +344,7 @@ fn main() {
             imgui_ui.same_line(0.0);
                                 
             if imgui_ui.button(im_str!("Clear images"), [0.0, 32.0]) {
-                open_images.clear();
+                clear_open_images(&mut open_images, &mut selected_image);
             }
             imgui_ui.same_line(0.0);
                                 
@@ -335,7 +361,7 @@ fn main() {
         }
 
         //Draw main window where images are displayed
-        let mut focus_control_panel = false;
+        let mut focus_control_panel = false;    //Gets set if the user selected an image this frame
         if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
                             .position([0.0, menu_height], Condition::Always)
                             .size([window_size.x as f32, window_size.y as f32 - menu_height], Condition::Always)
@@ -347,7 +373,8 @@ fn main() {
                             .begin(&imgui_ui) {
 
             if auto_scroll {
-                imgui_ui.set_scroll_y(imgui_ui.scroll_y() + 1.0);
+                let dist = 200.0 * delta_time;
+                imgui_ui.set_scroll_y(imgui_ui.scroll_y() + dist);
                 if imgui_ui.scroll_y() >= imgui_ui.scroll_max_y() {
                     imgui_ui.set_scroll_y(0.0);
                 }
@@ -374,6 +401,7 @@ fn main() {
             token.end(&imgui_ui);
         }
 
+        //Image control panel window
         if let Some(image) = selected_image {
             fn close_window(selected_image: &mut Option<usize>) {
                 *selected_image = None;
@@ -387,30 +415,56 @@ fn main() {
                                  .focused(focus_control_panel)
                                  .begin(&imgui_ui) {
                 imgui_ui.text(im_str!("{}", im.name));
-                imgui_ui.separator();
 
-                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
-                
-                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
-
-                }
-
-                if imgui_ui.button(im_str!("Remove"), [0.0, 32.0]) {
+                if imgui_ui.button(im_str!("Remove this image"), [0.0, 32.0]) {
                     to_remove = Some(image);
                     close_window(&mut selected_image);
                 }
                 imgui_ui.separator();
 
-                imgui_ui.set_next_item_width(200.0);
+                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
+                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
+                    let new_tag = new_tag_buffer.clone();
+                    new_tag_buffer.clear();
+                    
+                    //Do SQL
+                    if !tags.contains(&new_tag) {
+                        connection.execute(format!(
+                            "
+                            INSERT OR IGNORE INTO tags (name) VALUES (\"{}\");
+                            INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
+                            INSERT OR IGNORE INTO image_tags VALUES (
+                                    (SELECT id FROM images WHERE path=\"{}\")
+                                ,   (SELECT id FROM tags WHERE name=\"{}\")
+                                );
+                            ", new_tag.to_str(), im.name, im.name, new_tag.to_str())
+                        ).unwrap();
+                    }
+
+                    //Insert tags into appropriate arrays
+                    insert_tag(&mut tags, &new_tag);
+                    insert_tag(&mut im.tags, &new_tag);
+
+                }
+                imgui_ui.separator();
+
+                imgui_ui.set_next_item_width(dropdown_width);
                 imgui::ComboBox::new(im_str!("Extant tags")).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
                 if imgui_ui.button(im_str!("Apply tag to image"), [0.0, 32.0]) {
-                    im.tags.push(&tags[control_panel_tag])
+                    let r = tags[control_panel_tag].clone();
+                    insert_tag(&mut im.tags, &r);
                 }
                 imgui_ui.separator();
 
                 imgui_ui.text(im_str!("Click on a tag to remove it from this image:"));
-                for tag in &im.tags {
-                    imgui_ui.checkbox(tag, &mut true);
+                let mut to_remove = None;
+                for i in 0..im.tags.len() {
+                    if imgui_ui.checkbox(&im.tags[i], &mut true) {
+                        to_remove = Some(i);
+                    }
+                }
+                if let Some(idx) = to_remove {
+                    im.tags.remove(idx);
                 }
 
                 token.end(&imgui_ui);

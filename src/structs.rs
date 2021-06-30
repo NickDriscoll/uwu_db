@@ -1,18 +1,18 @@
 use gl::types::*;
-use imgui::ImStr;
+use imgui::ImString;
 use ozy::glutil;
 use ozy::structs::ImageData;
 use crate::DEFAULT_TEX_PARAMS;
 
-pub struct OpenImage<'a> {
+pub struct OpenImage {
     pub name: String,
-    pub tags: Vec<&'a ImStr>,
+    pub tags: Vec<ImString>,
     pub gl_name: GLuint,
     pub width: usize,
     pub height: usize
 }
 
-impl<'a> OpenImage<'a> {
+impl OpenImage {
     pub fn from_path(path: String) -> Self {
         println!("Trying to load: {}", path);
         let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
@@ -43,7 +43,7 @@ impl<'a> OpenImage<'a> {
     }
 }
 
-impl<'a> Drop for OpenImage<'a> {
+impl Drop for OpenImage {
     fn drop(&mut self) {
         unsafe { gl::DeleteTextures(1, &mut self.gl_name); }
     }
