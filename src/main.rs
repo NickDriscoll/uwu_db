@@ -3,6 +3,7 @@ extern crate tinyfiledialogs as tfd;
 extern crate ozy_engine as ozy;
 
 use sqlite::State;
+use core::ops::RangeInclusive;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
@@ -10,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, im_str};
+use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use ozy::structs::ImageData;
@@ -69,7 +70,7 @@ fn main() {
         }
     };
     glfw.window_hint(WindowHint::RefreshRate(Some(60)));
-    let (mut window, events) = glfw.create_window(window_size.x, window_size.y, "uwu_db", WindowMode::Windowed).unwrap();
+    let (mut window, events) = glfw.create_window(window_size.x, window_size.y, "uwu_db", WindowMode::Windowed).unwrap();    
     window.set_key_polling(true);
     window.set_mouse_button_polling(true);
     window.set_cursor_pos_polling(true);
@@ -211,7 +212,7 @@ fn main() {
     let mut selected_tag = 0;
     let mut control_panel_tag = 0;
     let mut selected_image = None;
-    let mut pics_per_row = 3;
+    let mut pics_per_row: u32 = 3;
     let mut auto_scroll = false;
 
     let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
@@ -287,7 +288,9 @@ fn main() {
                 WindowEvent::FileDrop(file_paths) => {
                     for path in file_paths {
                         let s = String::from(path.to_str().unwrap());
-                        path_tx.send(s).unwrap();
+                        if let Err(e) = path_tx.send(s) {
+                            println!("{}", e);
+                        }
                     }
                 }
                 _ => { println!("Unhandled event: {:?}", event); }
@@ -330,6 +333,10 @@ fn main() {
 
                 //Bind SQL variables
             }
+            imgui_ui.same_line(0.0);
+
+            imgui_ui.set_next_item_width(200.0);
+            imgui::Slider::new(im_str!("Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
             imgui_ui.same_line(0.0);
 
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
@@ -383,17 +390,20 @@ fn main() {
             for i in 0..open_images.len() {
                 let im = &open_images[i];
                 let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
+                /*
                 let factor = if im.width > max_width as usize {
                     max_width as f32 / im.width as f32
                 } else {
                     1.0
                 };
+                */
+                let factor = max_width as f32 / im.width as f32;
                 if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
                     selected_image = Some(i);
                     focus_control_panel = true;
                 }
                 imgui_ui.same_line(0.0);
-                if i % pics_per_row == pics_per_row - 1 {
+                if i as u32 % pics_per_row == pics_per_row - 1 {
                     imgui_ui.new_line();
                 }
             }
@@ -414,6 +424,10 @@ fn main() {
                                  .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)
                                  .focused(focus_control_panel)
                                  .begin(&imgui_ui) {
+                if !imgui_ui.is_window_focused_with_flags(WindowFocusedFlags::CHILD_WINDOWS) {
+                    close_window(&mut selected_image);
+                }
+
                 imgui_ui.text(im_str!("{}", im.name));
 
                 if imgui_ui.button(im_str!("Remove this image"), [0.0, 32.0]) {
@@ -444,7 +458,6 @@ fn main() {
                     //Insert tags into appropriate arrays
                     insert_tag(&mut tags, &new_tag);
                     insert_tag(&mut im.tags, &new_tag);
-
                 }
                 imgui_ui.separator();
 
