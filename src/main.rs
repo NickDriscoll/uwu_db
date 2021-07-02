@@ -196,8 +196,6 @@ fn main() {
             CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
             CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
-            
-            INSERT INTO tags (name) VALUES (\"Persona\");
             "
         ).unwrap();
         
@@ -226,6 +224,7 @@ fn main() {
     let mut selected_tag = 0;
     let mut control_panel_tag = 0;
     let mut selected_image = None;
+    let mut time_selected = 0.0;
     let mut pics_per_row: u32 = 3;
     let mut auto_scroll = false;
 
@@ -245,7 +244,8 @@ fn main() {
             let dur = frame_instant.duration_since(frame_timer.last_frame_instant);
             frame_timer.last_frame_instant = frame_instant;
             dur.as_secs_f32()
-        };        
+        };
+        frame_timer.elapsed_time += delta_time;
 
         let imgui_io = imgui_context.io_mut();
 
@@ -309,7 +309,7 @@ fn main() {
         let imgui_ui = imgui_context.frame();
 
         //Receive images from the image loading thread
-        while let Ok((image, path)) = openimage_rx.try_recv() {
+        if let Ok((image, path)) = openimage_rx.try_recv() {
             //Insert this image into the database if it doesn't already exisT
             while let Err(e) = connection.execute(format!(
                 "
@@ -320,7 +320,7 @@ fn main() {
             }
 
             //Retrieve all tags for this image from the DB
-            let mut tag_statement = connection.prepare("                
+            let mut tag_statement = connection.prepare("
                 SELECT name FROM tags
                 JOIN
                 (SELECT tag_id FROM image_tags
@@ -430,8 +430,26 @@ fn main() {
                 let im = &open_images[i];
                 let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
                 let factor = max_width as f32 / im.width as f32;
-                if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
+
+                //Color the selected image
+                let tint_color = match selected_image {
+                    Some(idx) => {
+                        if i == idx {
+                            let time = frame_timer.elapsed_time - time_selected;
+                            let func = 0.5 * f32::cos(6.0 * time) + 0.5;
+                            [1.0, 1.0, func, 1.0]
+                        } else { 
+                            [1.0, 1.0, 1.0, 1.0]
+                        }
+                    }
+                    None => {
+                        [1.0, 1.0, 1.0, 1.0]
+                    }
+                };
+
+                if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).tint_col(tint_color).build(&imgui_ui) {
                     selected_image = Some(i);
+                    time_selected = frame_timer.elapsed_time;
                     focus_control_panel = true;
                 }
                 imgui_ui.same_line(0.0);
@@ -463,13 +481,13 @@ fn main() {
                 imgui_ui.text(im_str!("{}", im.name));
 
                 if imgui_ui.button(im_str!("Remove this image"), [0.0, 32.0]) {
-                    to_remove = Some(image);
+                    to_remove = Some(image);                    
                     close_window(&mut selected_image);
                 }
                 imgui_ui.separator();
 
                 imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
-                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
+                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) && new_tag_buffer.to_str().len() > 0 {
                     let new_tag = new_tag_buffer.clone();
                     new_tag_buffer.clear();
                     
@@ -494,19 +512,21 @@ fn main() {
                 imgui_ui.separator();
 
                 imgui_ui.set_next_item_width(dropdown_width);
-                imgui::ComboBox::new(im_str!("Extant tags")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
+                imgui::ComboBox::new(im_str!("Pre-existing tags")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
                 if imgui_ui.button(im_str!("Apply tag to image"), [0.0, 32.0]) {
                     let r = tags[control_panel_tag].clone();
 
                     //Do SQL
-                    connection.execute(format!(
-                        "
-                        INSERT OR IGNORE INTO image_tags VALUES (
-                            (SELECT id FROM images WHERE path=\"{}\")
-                        ,   (SELECT id FROM tags WHERE name=\"{}\")
-                        );
-                        ", im.name, r.to_str()
-                    )).unwrap();
+                    if !tags.contains(&r) {
+                        connection.execute(format!(
+                            "
+                            INSERT OR IGNORE INTO image_tags VALUES (
+                                (SELECT id FROM images WHERE path=\"{}\")
+                            ,   (SELECT id FROM tags WHERE name=\"{}\")
+                            );
+                            ", im.name, r.to_str()
+                        )).unwrap();
+                    }
 
                     insert_tag(&mut im.tags, &r);
                 }
@@ -519,7 +539,10 @@ fn main() {
                         to_remove = Some(i);
                     }
                 }
+
+                //If we're removing a tag from an image
                 if let Some(idx) = to_remove {
+                    //Delete the relationship in the database
                     connection.execute(format!("
                         DELETE FROM image_tags WHERE image_id=(
                             SELECT id FROM images WHERE path=\"{}\"
@@ -532,7 +555,7 @@ fn main() {
 
                 token.end(&imgui_ui);
             }
-            if let Some(index) = to_remove {            
+            if let Some(index) = to_remove {
                 open_images.remove(index);
             }
         }
