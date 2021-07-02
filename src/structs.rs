@@ -33,6 +33,7 @@ impl OpenImage {
         let height = image_data.height;
         let width = image_data.width;
         let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
+
         OpenImage {
             name: path,
             tags: Vec::new(),

@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
+use imgui::{ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use ozy::structs::ImageData;
@@ -41,6 +41,14 @@ JOIN
         SELECT id FROM tags WHERE name="persona"
       ))
 WHERE id=image_id;
+
+SELECT name FROM tags
+JOIN
+  (SELECT tag_id FROM image_tags
+  WHERE image_tags.image_id = (
+        SELECT id FROM images WHERE name="some_path.png"
+      ))
+WHERE id=tag_id;
 */
 
 fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {    
@@ -55,6 +63,12 @@ fn insert_tag(strs: &mut Vec<ImString>, new_str: &ImString) {
     if !strs.contains(&new_str) {
         strs.push(new_str.clone());
         strs.sort();
+    }
+}
+
+fn send_or_error<T>(tx: &mpsc::Sender<T>, item: T) {
+    if let Err(e) = tx.send(item) {
+        println!("{}", e);
     }
 }
 
@@ -85,8 +99,8 @@ fn main() {
     //OpenGL static config
     unsafe {        
 		gl::Enable(gl::FRAMEBUFFER_SRGB); 								//Enable automatic linear->SRGB space conversion
+        gl::Enable(gl::SCISSOR_TEST);                                   //Enable scissor test for GUI clipping
         gl::Enable(gl::BLEND);											//Enable alpha blending
-        gl::Enable(gl::SCISSOR_TEST);
 		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))        
         
         #[cfg(gloutput)]
@@ -246,16 +260,7 @@ fn main() {
                     imgui_io.display_size[1] = y as f32;
                 }
                 WindowEvent::MouseButton (button, action, ..) => {
-                    let idx = match button {
-                        MouseButton::Button1 => { 0 }
-                        MouseButton::Button2 => { 1 }
-                        MouseButton::Button3 => { 2 }
-                        MouseButton::Button4 => { 3 }
-                        MouseButton::Button5 => { 4 }
-                        MouseButton::Button6 => { 5 }
-                        MouseButton::Button7 => { 6 }
-                        MouseButton::Button8 => { 7 }
-                    };
+                    let idx = button as usize - MouseButton::Button1 as usize;
 
                     match action {
                         Action::Press => {
@@ -288,9 +293,7 @@ fn main() {
                 WindowEvent::FileDrop(file_paths) => {
                     for path in file_paths {
                         let s = String::from(path.to_str().unwrap());
-                        if let Err(e) = path_tx.send(s) {
-                            println!("{}", e);
-                        }
+                        send_or_error(&path_tx, s);
                     }
                 }
                 _ => { println!("Unhandled event: {:?}", event); }
@@ -307,7 +310,33 @@ fn main() {
 
         //Receive images from the image loading thread
         while let Ok((image, path)) = openimage_rx.try_recv() {
-            let o = OpenImage::from_imagedata(image, path);
+            //Insert this image into the database if it doesn't already exisT
+            while let Err(e) = connection.execute(format!(
+                "
+                INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
+                ", path
+            )) {
+                println!("{}", e);
+            }
+
+            //Retrieve all tags for this image from the DB
+            let mut tag_statement = connection.prepare("                
+                SELECT name FROM tags
+                JOIN
+                (SELECT tag_id FROM image_tags
+                WHERE image_tags.image_id = (
+                        SELECT id FROM images WHERE path=?
+                    ))
+                WHERE id=tag_id ORDER BY name;
+            ").unwrap();
+            tag_statement.bind(1, &*path).unwrap();
+
+            let mut o = OpenImage::from_imagedata(image, path);
+
+            while let State::Row = tag_statement.next().unwrap() {
+                o.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
+            }
+
             open_images.push(o);
         }
 
@@ -327,11 +356,23 @@ fn main() {
             }
             
             imgui_ui.set_next_item_width(dropdown_width);
-            if imgui::ComboBox::new(im_str!("Active tag")).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
-                let tag = &tags[selected_tag];
+            if imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
                 clear_open_images(&mut open_images, &mut selected_image);
 
-                //Bind SQL variables
+                let mut statement = connection.prepare("
+                    SELECT path FROM images
+                    JOIN
+                    (SELECT image_id FROM image_tags
+                    WHERE image_tags.tag_id = (
+                            SELECT id FROM tags WHERE name=?
+                        ))
+                    WHERE id=image_id;
+                ").unwrap();
+                statement.bind(1, tags[selected_tag].to_str()).unwrap();
+                while let State::Row = statement.next().unwrap() {
+                    let s = statement.read::<String>(0).unwrap();
+                    send_or_error(&path_tx, s);
+                }
             }
             imgui_ui.same_line(0.0);
 
@@ -342,9 +383,7 @@ fn main() {
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:/images/", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
-                        if let Err(e) = path_tx.send(path) {
-                            println!("{}", e);
-                        }
+                        send_or_error(&path_tx, path);
                     }
                 }
             }
@@ -390,13 +429,6 @@ fn main() {
             for i in 0..open_images.len() {
                 let im = &open_images[i];
                 let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
-                /*
-                let factor = if im.width > max_width as usize {
-                    max_width as f32 / im.width as f32
-                } else {
-                    1.0
-                };
-                */
                 let factor = max_width as f32 / im.width as f32;
                 if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).build(&imgui_ui) {
                     selected_image = Some(i);
@@ -462,9 +494,20 @@ fn main() {
                 imgui_ui.separator();
 
                 imgui_ui.set_next_item_width(dropdown_width);
-                imgui::ComboBox::new(im_str!("Extant tags")).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
+                imgui::ComboBox::new(im_str!("Extant tags")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
                 if imgui_ui.button(im_str!("Apply tag to image"), [0.0, 32.0]) {
                     let r = tags[control_panel_tag].clone();
+
+                    //Do SQL
+                    connection.execute(format!(
+                        "
+                        INSERT OR IGNORE INTO image_tags VALUES (
+                            (SELECT id FROM images WHERE path=\"{}\")
+                        ,   (SELECT id FROM tags WHERE name=\"{}\")
+                        );
+                        ", im.name, r.to_str()
+                    )).unwrap();
+
                     insert_tag(&mut im.tags, &r);
                 }
                 imgui_ui.separator();
@@ -477,6 +520,13 @@ fn main() {
                     }
                 }
                 if let Some(idx) = to_remove {
+                    connection.execute(format!("
+                        DELETE FROM image_tags WHERE image_id=(
+                            SELECT id FROM images WHERE path=\"{}\"
+                        ) AND tag_id=(
+                            SELECT id FROM tags WHERE name=\"{}\"
+                        )
+                    ", im.name, im.tags[idx].to_str())).unwrap();
                     im.tags.remove(idx);
                 }
 
@@ -548,6 +598,7 @@ fn main() {
             }
         }
 
+        //Present the drawn frame before returning to the beginning of the loop
         window.swap_buffers();
     }
 }
