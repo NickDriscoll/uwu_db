@@ -21,34 +21,14 @@ use crate::structs::*;
 
 mod structs;
 
+//Texture parameters that the images will all use
 const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_WRAP_S, gl::REPEAT),
     (gl::TEXTURE_WRAP_T, gl::REPEAT),
     (gl::TEXTURE_MIN_FILTER, gl::LINEAR),
     (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
 ];
-
-/*
-Prepared statements for later:
-
-SELECT name FROM tags;
-
-SELECT path FROM images
-JOIN
-  (SELECT image_id FROM image_tags
-  WHERE image_tags.tag_id = (
-        SELECT id FROM tags WHERE name="persona"
-      ))
-WHERE id=image_id;
-
-SELECT name FROM tags
-JOIN
-  (SELECT tag_id FROM image_tags
-  WHERE image_tags.image_id = (
-        SELECT id FROM images WHERE name="some_path.png"
-      ))
-WHERE id=tag_id;
-*/
+const IMAGE_DIRECTORY: &str = "L:/images/good";
 
 fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {    
     let mut tag_refs = Vec::with_capacity(strs.len());
@@ -82,8 +62,10 @@ fn main() {
             return;
         }
     };
-    glfw.window_hint(WindowHint::RefreshRate(Some(60)));
-    let (mut window, events) = glfw.create_window(window_size.x, window_size.y, "uwu_db", WindowMode::Windowed).unwrap();    
+    //glfw.window_hint(WindowHint::RefreshRate(Some(60)));
+    let (mut window, events) = glfw.create_window(window_size.x, window_size.y, "uwu_db", WindowMode::Windowed).unwrap();
+
+    //Enable polling for the events we wish to receive
     window.set_key_polling(true);
     window.set_mouse_button_polling(true);
     window.set_cursor_pos_polling(true);
@@ -101,7 +83,7 @@ fn main() {
         gl::Enable(gl::SCISSOR_TEST);                                   //Enable scissor test for GUI clipping
         gl::Enable(gl::BLEND);											//Enable alpha blending
 		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
-        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);                       //Sets the texture alignment requirements to be byte-aligned
         
         #[cfg(gloutput)]
 		{
@@ -321,6 +303,9 @@ fn main() {
                 println!("{}", e);
             }
 
+            //Create the open image struct
+            let mut open_image = OpenImage::from_imagedata(image, path);
+
             //Retrieve all tags for this image from the DB
             let mut tag_statement = connection.prepare("
                 SELECT name FROM tags
@@ -331,15 +316,13 @@ fn main() {
                     ))
                 WHERE id=tag_id ORDER BY name;
             ").unwrap();
-            tag_statement.bind(1, &*path).unwrap();
-
-            let mut o = OpenImage::from_imagedata(image, path);
+            tag_statement.bind(1, &*open_image.name).unwrap();
 
             while let State::Row = tag_statement.next().unwrap() {
-                o.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
+                open_image.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
             }
 
-            open_images.push(o);
+            open_images.push(open_image);
             loader_thread.images_in_flight -= 1;
         }
 
@@ -374,7 +357,8 @@ fn main() {
                 statement.bind(1, tags[selected_tag].to_str()).unwrap();
                 while let State::Row = statement.next().unwrap() {
                     let s = statement.read::<String>(0).unwrap();
-                    loader_thread.queue_image(s);
+                    let path = format!("{}/{}", IMAGE_DIRECTORY, s);
+                    loader_thread.queue_image(path);
                 }
             }
             imgui_ui.same_line(0.0);
@@ -384,7 +368,7 @@ fn main() {
             imgui_ui.same_line(0.0);
 
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
-                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:/images/", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", IMAGE_DIRECTORY, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
                         loader_thread.queue_image(path);
                     }

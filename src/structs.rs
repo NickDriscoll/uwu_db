@@ -15,29 +15,26 @@ pub struct OpenImage {
 }
 
 impl OpenImage {
-    pub fn from_path(path: String) -> Self {
-        println!("Trying to load: {}", path);
-        let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
-        let height = image_data.height;
-        let width = image_data.width;
-        let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
-        println!("Loaded successfully.");
-        OpenImage {
-            name: path,
-            tags: Vec::new(),
-            gl_name,
-            width: width as usize,
-            height: height as usize
-        }
-    }
-
     pub fn from_imagedata(image_data: ImageData, path: String) -> Self {
         let height = image_data.height;
         let width = image_data.width;
         let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
+        
+        let name = {
+            let mut last_slash_index = 0;
+            let mut current_index = 0;
+            for c in path.chars() {
+                if c == '\\' {
+                    last_slash_index = current_index;
+                }
+                current_index += 1;
+            }
+
+            String::from(path.split_at(last_slash_index + 1).1)
+        };
 
         OpenImage {
-            name: path,
+            name,
             tags: Vec::new(),
             gl_name,
             width: width as usize,
