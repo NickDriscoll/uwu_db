@@ -14,11 +14,10 @@ use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMod
 use imgui::{ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
-use ozy::structs::ImageData;
 use gl::types::*;
 use tfd::MessageBoxIcon;
 
-use crate::structs::OpenImage;
+use crate::structs::*;
 
 mod structs;
 
@@ -101,7 +100,8 @@ fn main() {
 		gl::Enable(gl::FRAMEBUFFER_SRGB); 								//Enable automatic linear->SRGB space conversion
         gl::Enable(gl::SCISSOR_TEST);                                   //Enable scissor test for GUI clipping
         gl::Enable(gl::BLEND);											//Enable alpha blending
-		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))        
+		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
         
         #[cfg(gloutput)]
 		{
@@ -227,9 +227,11 @@ fn main() {
     let mut time_selected = 0.0;
     let mut pics_per_row: u32 = 3;
     let mut auto_scroll = false;
-
+    
     let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
     let (openimage_tx, openimage_rx) = mpsc::channel();
+    let mut loader_thread = LoaderThread::new(path_tx);
+
     thread::spawn(move || {
         while let Ok(path) = path_rx.recv() {
             let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
@@ -293,7 +295,7 @@ fn main() {
                 WindowEvent::FileDrop(file_paths) => {
                     for path in file_paths {
                         let s = String::from(path.to_str().unwrap());
-                        send_or_error(&path_tx, s);
+                        loader_thread.queue_image(s);
                     }
                 }
                 _ => { println!("Unhandled event: {:?}", event); }
@@ -310,7 +312,7 @@ fn main() {
 
         //Receive images from the image loading thread
         if let Ok((image, path)) = openimage_rx.try_recv() {
-            //Insert this image into the database if it doesn't already exisT
+            //Insert this image into the database if it doesn't already exist
             while let Err(e) = connection.execute(format!(
                 "
                 INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
@@ -338,6 +340,7 @@ fn main() {
             }
 
             open_images.push(o);
+            loader_thread.images_in_flight -= 1;
         }
 
         //Top menu
@@ -356,7 +359,7 @@ fn main() {
             }
             
             imgui_ui.set_next_item_width(dropdown_width);
-            if imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
+            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
                 clear_open_images(&mut open_images, &mut selected_image);
 
                 let mut statement = connection.prepare("
@@ -371,7 +374,7 @@ fn main() {
                 statement.bind(1, tags[selected_tag].to_str()).unwrap();
                 while let State::Row = statement.next().unwrap() {
                     let s = statement.read::<String>(0).unwrap();
-                    send_or_error(&path_tx, s);
+                    loader_thread.queue_image(s);
                 }
             }
             imgui_ui.same_line(0.0);
@@ -383,7 +386,7 @@ fn main() {
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", "L:/images/", Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
-                        send_or_error(&path_tx, path);
+                        loader_thread.queue_image(path);
                     }
                 }
             }
@@ -512,12 +515,12 @@ fn main() {
                 imgui_ui.separator();
 
                 imgui_ui.set_next_item_width(dropdown_width);
-                imgui::ComboBox::new(im_str!("Pre-existing tags")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice());
-                if imgui_ui.button(im_str!("Apply tag to image"), [0.0, 32.0]) {
+                if imgui::ComboBox::new(im_str!("Choose existing tag to apply to image")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut control_panel_tag, imstr_ref_array(&tags).as_slice()) || 
+                    imgui_ui.button(im_str!("Apply tag"), [0.0, 32.0]) {
                     let r = tags[control_panel_tag].clone();
 
                     //Do SQL
-                    if !tags.contains(&r) {
+                    if !im.tags.contains(&r) {
                         connection.execute(format!(
                             "
                             INSERT OR IGNORE INTO image_tags VALUES (

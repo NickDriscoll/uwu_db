@@ -2,7 +2,9 @@ use gl::types::*;
 use imgui::ImString;
 use ozy::glutil;
 use ozy::structs::ImageData;
-use crate::DEFAULT_TEX_PARAMS;
+use std::sync::mpsc::Sender;
+
+use crate::*;
 
 pub struct OpenImage {
     pub name: String,
@@ -47,5 +49,25 @@ impl OpenImage {
 impl Drop for OpenImage {
     fn drop(&mut self) {
         unsafe { gl::DeleteTextures(1, &mut self.gl_name); }
+    }
+}
+
+//Represents the current state of the image loading thread
+pub struct LoaderThread {
+    pub images_in_flight: usize,
+    pub sender: Sender<String>
+}
+
+impl LoaderThread {
+    pub fn new(sender: Sender<String>) -> Self {
+        LoaderThread {
+            images_in_flight: 0,
+            sender
+        }
+    }
+
+    pub fn queue_image(&mut self, path: String) {
+        send_or_error(&self.sender, path);
+        self.images_in_flight += 1;
     }
 }
