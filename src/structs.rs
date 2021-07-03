@@ -24,7 +24,7 @@ impl OpenImage {
             let mut last_slash_index = 0;
             let mut current_index = 0;
             for c in path.chars() {
-                if c == '\\' {
+                if c == '\\' || c == '/' {
                     last_slash_index = current_index;
                 }
                 current_index += 1;

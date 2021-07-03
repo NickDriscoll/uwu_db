@@ -294,17 +294,17 @@ fn main() {
 
         //Receive images from the image loading thread
         if let Ok((image, path)) = openimage_rx.try_recv() {
+            //Create the open image struct
+            let mut open_image = OpenImage::from_imagedata(image, path);
+            
             //Insert this image into the database if it doesn't already exist
             while let Err(e) = connection.execute(format!(
                 "
                 INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
-                ", path
+                ", open_image.name
             )) {
                 println!("{}", e);
             }
-
-            //Create the open image struct
-            let mut open_image = OpenImage::from_imagedata(image, path);
 
             //Retrieve all tags for this image from the DB
             let mut tag_statement = connection.prepare("
