@@ -1,3 +1,4 @@
+//Alias the long library names
 extern crate nalgebra_glm as glm;
 extern crate tinyfiledialogs as tfd;
 extern crate ozy_engine as ozy;
@@ -7,7 +8,7 @@ use core::ops::RangeInclusive;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
-use std::thread;
+use std::{fs, thread};
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
@@ -58,7 +59,7 @@ fn main() {
     let mut glfw = match glfw::init(glfw::FAIL_ON_ERRORS) {
         Ok(g) => { g }
         Err(e) => {
-            println!("Error initializing GLFW: {}", e);
+            tfd::message_box_ok("Error initializing GLFW", &format!("Error initializing GLFW: {}", e), MessageBoxIcon::Error);            
             return;
         }
     };
@@ -78,13 +79,14 @@ fn main() {
     gl::load_with(|symbol| window.get_proc_address(symbol));
 
     //OpenGL static config
-    unsafe {        
+    unsafe {
 		gl::Enable(gl::FRAMEBUFFER_SRGB); 								//Enable automatic linear->SRGB space conversion
         gl::Enable(gl::SCISSOR_TEST);                                   //Enable scissor test for GUI clipping
         gl::Enable(gl::BLEND);											//Enable alpha blending
 		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
         gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);                       //Sets the texture alignment requirements to be byte-aligned
         
+        //These options are only compiled in if the 'gloutput' flag is passed
         #[cfg(gloutput)]
 		{
             use std::ptr;
@@ -113,7 +115,7 @@ fn main() {
         io.display_size[0] = window.get_size().0 as f32;
         io.display_size[1] = window.get_size().1 as f32;
 
-        //Set up keyboard map
+        //Set up keyboard index map
         io.key_map[imgui::Key::Tab as usize] = Key::Tab as u32;
         io.key_map[imgui::Key::LeftArrow as usize] = Key::Left as u32;
         io.key_map[imgui::Key::RightArrow as usize] = Key::Right as u32;
@@ -140,7 +142,7 @@ fn main() {
     //Imgui style init
     {
         let style = imgui_context.style_mut();
-        style.use_dark_colors();
+        style.use_dark_colors();                //Just using Dear Imgui's default dark style for now
     }
 
     //Create and upload Dear IMGUI font atlas
@@ -192,6 +194,7 @@ fn main() {
             "
         ).unwrap();
 
+        //Convert to imgui::ImString
         let mut ts = Vec::new();
         while let State::Row = tag_statement.next().unwrap() {
             let the_string = tag_statement.read::<String>(0).unwrap();
@@ -200,24 +203,25 @@ fn main() {
         ts
     };
 
-    let dropdown_width = 150.0;
-    let mut open_images: Vec<OpenImage> = vec![];
-    let mut new_tag_buffer = imgui::ImString::with_capacity(256);
-    let mut selected_tag = 0;
-    let mut control_panel_tag = 0;
-    let mut selected_image = None;
-    let mut time_selected = 0.0;
-    let mut pics_per_row: u32 = 3;
-    let mut auto_scroll = false;
+    let dropdown_width = 150.0;                                     //Width of dropdown boxes
+    let mut open_images: Vec<OpenImage> = vec![];                   //Array of structs containing data for each currently open image in the program
+    let mut new_tag_buffer = imgui::ImString::with_capacity(256);   //Buffer for the tag name input box
+    let mut selected_tag = 0;                                       //Index into tags filter dropdown
+    let mut control_panel_tag = 0;                                  //Index into tags dropdown in image control panel
+    let mut selected_image = None;                                  //Index into open_images of which image is currently selected or None
+    let mut time_selected = 0.0;                                    //Value of elapsed_time when the currently selected image was selected
+    let mut pics_per_row: u32 = 3;                                  //Number of pictures in a row
+    let mut auto_scroll = false;                                    //Auto-scroll flag
     
-    let (path_tx, path_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel();
-    let (openimage_tx, openimage_rx) = mpsc::channel();
-    let mut loader_thread = LoaderThread::new(path_tx);
-
+    //Set up the thread for loading the image data from disk
+    let (path_tx, path_rx) = mpsc::channel();                   //Channel for sending paths to the loader thread
+    let (openimage_tx, openimage_rx) = mpsc::channel();         //Channel for sending image data back to the main thread
+    let mut loader_thread = LoaderThread::new(path_tx);         //Client-side tracking of loader thread data
     thread::spawn(move || {
+        //recv() is a blocking function, so this is an infinite loop
         while let Ok(path) = path_rx.recv() {
             let image_data = glutil::image_data_from_path(&path, glutil::ColorSpace::Gamma);
-            openimage_tx.send((image_data, path)).unwrap();
+            send_or_error(&openimage_tx, (image_data, path));
         }
     });
 
@@ -231,8 +235,8 @@ fn main() {
         };
         frame_timer.elapsed_time += delta_time;
 
-        let imgui_io = imgui_context.io_mut();
-
+        //This section is mostly just passing window events into Dear Imgui
+        let imgui_io = imgui_context.io_mut();      //Getting reference to the io data struct
         glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
             match event {
@@ -293,9 +297,18 @@ fn main() {
         let imgui_ui = imgui_context.frame();
 
         //Receive images from the image loading thread
-        if let Ok((image, path)) = openimage_rx.try_recv() {
+        while let Ok((image, path)) = openimage_rx.try_recv() {
             //Create the open image struct
             let mut open_image = OpenImage::from_imagedata(image, path);
+
+            //Copy this image into IMAGE_DIRECTORY if it isn't already there
+            let new_path = format!("{}/{}", IMAGE_DIRECTORY, open_image.name);
+            if !Path::new(&new_path).exists() {
+                //Copy the file to the new path
+                if let Err(e) = fs::copy(&open_image.orignal_path, &new_path) {
+                    println!("Error migrating image to {}: {}", IMAGE_DIRECTORY, e);
+                }
+            }
             
             //Insert this image into the database if it doesn't already exist
             while let Err(e) = connection.execute(format!(
@@ -318,6 +331,7 @@ fn main() {
             ").unwrap();
             tag_statement.bind(1, &*open_image.name).unwrap();
 
+            //Push each tag into the image's tags array
             while let State::Row = tag_statement.next().unwrap() {
                 open_image.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
             }
@@ -363,10 +377,12 @@ fn main() {
             }
             imgui_ui.same_line(0.0);
 
+            //Slider for selecting how many images are in a row
             imgui_ui.set_next_item_width(200.0);
             imgui::Slider::new(im_str!("Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
             imgui_ui.same_line(0.0);
 
+            //Button to spawn a file(s) selection dialogue for loading images
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", IMAGE_DIRECTORY, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
@@ -386,6 +402,7 @@ fn main() {
             }
             imgui_ui.same_line(0.0);
             
+            //Button to close the program
             if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
                 window.set_should_close(true);
             }
@@ -450,33 +467,63 @@ fn main() {
 
         //Image control panel window
         if let Some(image) = selected_image {
+            //Close this control panel window
             fn close_window(selected_image: &mut Option<usize>) {
                 *selected_image = None;
             }
 
-            let im = &mut open_images[image];
-            let mut to_remove = None;
+            //Remove image from list of currently displayed images
+            fn close_image(image: usize, to_remove: &mut Option<usize>, selected_image: &mut Option<usize>) {
+                *to_remove = Some(image);                    
+                close_window(selected_image);
+            }
+
+            let im = &mut open_images[image];       //Get mutable reference to the selected image
+            let mut to_remove = None;               //Gets set if the selected image is to be removed
+
+            //Create control panel for manipulating the selected image  
             if let Some(token) = imgui::Window::new(im_str!("Image control panel"))
                                  .collapsible(false)
-                                 .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)
+                                 .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)   //We want it to spawn roughly in the middle of the screen the first time it's opened
                                  .focused(focus_control_panel)
                                  .begin(&imgui_ui) {
+
+                //We want the control panel to close as soon as it loses focus                                    
                 if !imgui_ui.is_window_focused_with_flags(WindowFocusedFlags::CHILD_WINDOWS) {
                     close_window(&mut selected_image);
                 }
 
-                imgui_ui.text(im_str!("{}", im.name));
+                //Displaying the image's path in the filesystem
+                imgui_ui.text(im_str!("{}", im.orignal_path));
 
-                if imgui_ui.button(im_str!("Remove this image"), [0.0, 32.0]) {
-                    to_remove = Some(image);                    
-                    close_window(&mut selected_image);
+                //Button to remove image from the current set
+                if imgui_ui.button(im_str!("Close this image"), [0.0, 32.0]) {
+                    close_image(image, &mut to_remove, &mut selected_image);
                 }
+                imgui_ui.same_line(0.0);
+
+                //Create button for completely deleting image
+                if imgui_ui.button(im_str!("Delete this image"), [0.0, 32.0]) {
+                    close_image(image, &mut to_remove, &mut selected_image);
+                    if let Err(e) = fs::remove_file(&im.orignal_path) {
+                        println!("Error deleting {}: {}", im.orignal_path, e);
+                    }
+
+                    let std_path = format!("{}/{}", IMAGE_DIRECTORY, im.name);
+                    if Path::new(&std_path) != Path::new(&im.orignal_path) {
+                        if let Err(e) = fs::remove_file(&std_path) {
+                            println!("Error deleting {}: {}", im.orignal_path, e);
+                        }
+                    }
+                }
+
                 imgui_ui.separator();
 
-                imgui::InputText::new(&imgui_ui, im_str!("New tag"), &mut new_tag_buffer).build();
-                if imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) && new_tag_buffer.to_str().len() > 0 {
-                    let new_tag = new_tag_buffer.clone();
-                    new_tag_buffer.clear();
+                //Create a text input field for entering tag names into
+                imgui::InputText::new(&imgui_ui, im_str!("New tag entry"), &mut new_tag_buffer).build();
+                if new_tag_buffer.to_str().len() > 0 && imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
+                    let new_tag = new_tag_buffer.clone();       //Make a copy of the text in the input field
+                    new_tag_buffer.clear();                     //Clear the input field
                     
                     //Do SQL
                     if !tags.contains(&new_tag) {
@@ -542,6 +589,8 @@ fn main() {
 
                 token.end(&imgui_ui);
             }
+
+            //Removing the selected image from the list
             if let Some(index) = to_remove {
                 open_images.remove(index);
             }

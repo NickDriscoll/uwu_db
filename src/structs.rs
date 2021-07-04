@@ -6,12 +6,14 @@ use std::sync::mpsc::Sender;
 
 use crate::*;
 
+//Stores all the state required for an image the program has loaded
 pub struct OpenImage {
-    pub name: String,
-    pub tags: Vec<ImString>,
-    pub gl_name: GLuint,
-    pub width: usize,
-    pub height: usize
+    pub name: String,				//Just the filename woth extension
+    pub orignal_path: String,       //The original path the image was opened from
+    pub tags: Vec<ImString>,		//Array of tags
+    pub gl_name: GLuint,			//GL texture
+    pub width: usize,				//Image width in pixels
+    pub height: usize				//Image height in pixels
 }
 
 impl OpenImage {
@@ -35,6 +37,7 @@ impl OpenImage {
 
         OpenImage {
             name,
+            orignal_path: path,
             tags: Vec::new(),
             gl_name,
             width: width as usize,
