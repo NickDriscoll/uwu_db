@@ -1,4 +1,4 @@
-//Alias the long library names
+ //Alias the long library names
 extern crate nalgebra_glm as glm;
 extern crate tinyfiledialogs as tfd;
 extern crate ozy_engine as ozy;
@@ -12,11 +12,11 @@ use std::{fs, thread};
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
+use imgui::{ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImageButton, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use gl::types::*;
-use tfd::MessageBoxIcon;
+use tfd::{MessageBoxIcon, YesNo};
 
 use crate::structs::*;
 
@@ -30,6 +30,7 @@ const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
 ];
 const IMAGE_DIRECTORY: &str = "L:/images/good";
+//const IMAGE_DIRECTORY: &str = "C:/Users/Nick/Pictures/images";
 
 fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {    
     let mut tag_refs = Vec::with_capacity(strs.len());
@@ -167,10 +168,11 @@ fn main() {
         FontAtlasRefMut::Shared(_) => {
             panic!("Not dealing with this case.");
         }
-    };
+    }
 
     //Open a connection to the database
     let db_name = "uwu.db";
+    //let db_name = "my_images.db";
     let connection = if !Path::new(db_name).exists() {
         let con = sqlite::open(db_name).unwrap();
         
@@ -297,7 +299,7 @@ fn main() {
         let imgui_ui = imgui_context.frame();
 
         //Receive images from the image loading thread
-        while let Ok((image, path)) = openimage_rx.try_recv() {
+        if let Ok((image, path)) = openimage_rx.try_recv() {
             //Create the open image struct
             let mut open_image = OpenImage::from_imagedata(image, path);
 
@@ -451,7 +453,10 @@ fn main() {
                     }
                 };
 
-                if imgui::ImageButton::new(imgui::TextureId::new(im.gl_name as usize), [im.width as f32 * factor, im.height as f32 * factor]).tint_col(tint_color).build(&imgui_ui) {
+                if ImageButton::new(TextureId::new(im.gl_name as usize),
+									[im.width as f32 * factor, im.height as f32 * factor])
+									.tint_col(tint_color)
+									.build(&imgui_ui) {
                     selected_image = Some(i);
                     time_selected = frame_timer.elapsed_time;
                     focus_control_panel = true;
@@ -504,15 +509,17 @@ fn main() {
 
                 //Create button for completely deleting image
                 if imgui_ui.button(im_str!("Delete this image"), [0.0, 32.0]) {
-                    close_image(image, &mut to_remove, &mut selected_image);
-                    if let Err(e) = fs::remove_file(&im.orignal_path) {
-                        println!("Error deleting {}: {}", im.orignal_path, e);
-                    }
-
-                    let std_path = format!("{}/{}", IMAGE_DIRECTORY, im.name);
-                    if Path::new(&std_path) != Path::new(&im.orignal_path) {
-                        if let Err(e) = fs::remove_file(&std_path) {
+                    if let YesNo::Yes = tfd::message_box_yes_no("Delete this image", &format!("You are about to permanently delete {}\nProceed?", im.name), MessageBoxIcon::Warning, YesNo::No) {                        
+                        close_image(image, &mut to_remove, &mut selected_image);
+                        if let Err(e) = fs::remove_file(&im.orignal_path) {
                             println!("Error deleting {}: {}", im.orignal_path, e);
+                        }
+
+                        let std_path = format!("{}/{}", IMAGE_DIRECTORY, im.name);
+                        if Path::new(&std_path) != Path::new(&im.orignal_path) {
+                            if let Err(e) = fs::remove_file(&std_path) {
+                                println!("Error deleting {}: {}", im.orignal_path, e);
+                            }
                         }
                     }
                 }
