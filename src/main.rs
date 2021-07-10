@@ -12,7 +12,7 @@ use std::{fs, thread};
 use std::time::{Duration, Instant};
 use std::sync::mpsc;
 use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImageButton, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
+use imgui::{ComboBox, ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImageButton, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use gl::types::*;
@@ -29,8 +29,6 @@ const DEFAULT_TEX_PARAMS: [(GLenum, GLenum); 4] = [
     (gl::TEXTURE_MIN_FILTER, gl::LINEAR),
     (gl::TEXTURE_MAG_FILTER, gl::LINEAR)
 ];
-const IMAGE_DIRECTORY: &str = "L:/images/good";
-//const IMAGE_DIRECTORY: &str = "C:/Users/Nick/Pictures/images";
 
 fn imstr_ref_array(strs: &Vec<ImString>) -> Vec<&ImString> {    
     let mut tag_refs = Vec::with_capacity(strs.len());
@@ -62,8 +60,15 @@ fn recompute_selected_tags(selected_image_tags: &mut Vec<bool>, tags: &Vec<ImStr
     }
 }
 
+fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<usize>) {
+    *selected_image = None;
+    images.clear();                
+}
+
 fn main() {
-    let mut window_size = glm::vec2(800, 600);
+    let mut window_size = glm::vec2(1280, 720);
+    let image_directory = "L:/images/good";
+    //const IMAGE_DIRECTORY: &str = "C:/Users/Nick/Pictures/images";
 
     //Init glfw and create the window
     let mut glfw = match glfw::init(glfw::FAIL_ON_ERRORS) {
@@ -85,16 +90,28 @@ fn main() {
     window.set_drag_and_drop_polling(true);
     window.set_char_polling(true);
 
-    //Load OpenGL functions
+    //Initialize OpenGL function pointers
+    //gl::load_with() takes a closure that returns an OpenGL procedure's address given its name
+    //GLFW's Window::get_proc_address() does just that, so we can effortless plug them into each other with this line
     gl::load_with(|symbol| window.get_proc_address(symbol));
+
+    //Compile IMGUI shader
+    let imgui_program = match glutil::compile_program_from_files("shaders/imgui.vert", "shaders/imgui.frag") {
+        Ok(shader) => { shader }
+        Err(e) => {
+            tfd::message_box_ok("GLSL compilation error", &format!("Unable to compile the GL shader:\n{}", e), MessageBoxIcon::Error);
+            exit(-1);
+        }
+    };
 
     //OpenGL static config
     unsafe {
-		gl::Enable(gl::FRAMEBUFFER_SRGB); 								//Enable automatic linear->SRGB space conversion
-        gl::Enable(gl::SCISSOR_TEST);                                   //Enable scissor test for GUI clipping
-        gl::Enable(gl::BLEND);											//Enable alpha blending
-		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			//Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
-        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);                       //Sets the texture alignment requirements to be byte-aligned
+		gl::Enable(gl::FRAMEBUFFER_SRGB); 								        //Enable automatic linear->SRGB space conversion
+        gl::Enable(gl::SCISSOR_TEST);                                           //Enable scissor test for GUI clipping
+        gl::Enable(gl::BLEND);											        //Enable alpha blending
+		gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);			        //Set blend func to (Cs * alpha + Cd * (1.0 - alpha))
+        gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);                               //Sets the texture alignment requirements to be byte-aligned
+        gl::UseProgram(imgui_program);                                          //This program only uses one GL program, so we can bind it once in advance
         
         //These options are only compiled in if the 'gloutput' flag is passed
         #[cfg(gloutput)]
@@ -106,18 +123,9 @@ fn main() {
 			gl::DebugMessageControl(gl::DONT_CARE, gl::DONT_CARE, gl::DONT_CARE, 0, ptr::null(), gl::TRUE);
 		}
     }
-
-    //Compile IMGUI shader
-    let imgui_program = match glutil::compile_program_from_files("shaders/imgui.vert", "shaders/imgui.frag") {
-        Ok(shader) => { shader }
-        Err(e) => {
-            tfd::message_box_ok("GLSL compilation error", &format!("Unable to compile the GL shader:\n{}", e), MessageBoxIcon::Error);
-            exit(-1);
-        }
-    };
     
-    //Creating Dear ImGui context
-    let mut imgui_context = imgui::Context::create();
+    let mut imgui_context = imgui::Context::create();       //Creating Dear ImGui context
+    imgui_context.style_mut().use_dark_colors();            //Just using Dear Imgui's default dark style for now
 
     //Imgui IO init
     {
@@ -149,16 +157,12 @@ fn main() {
         io.key_map[imgui::Key::Z as usize] = Key::Z as u32;
     }
 
-    //Imgui style init
-    {
-        imgui_context.style_mut().use_dark_colors();            //Just using Dear Imgui's default dark style for now
-    }
-
     //Create and upload Dear IMGUI font atlas
     match imgui_context.fonts() {
         FontAtlasRefMut::Owned(atlas) => unsafe {
-            let font_atlas = atlas.build_rgba32_texture();
+            let font_atlas = atlas.build_rgba32_texture();      //We need an RGBA texture in order for the images themselves to be rendered with color
 
+            //We sample the font atlas with gl::NEAREST filtering to prevent any possiblility of GUI blurriness due to sampling interpolation
             let tex_params = [
                 (gl::TEXTURE_WRAP_S, gl::REPEAT),
                 (gl::TEXTURE_WRAP_T, gl::REPEAT),
@@ -217,14 +221,12 @@ fn main() {
     let mut open_images: Vec<OpenImage> = vec![];                   //Array of structs containing data for each currently open image in the program
     let mut new_tag_buffer = imgui::ImString::with_capacity(256);   //Buffer for the tag name input box
     let mut selected_tag = 0;                                       //Index into tags filter dropdown
-    let mut control_panel_tag = 0;                                  //Index into tags dropdown in image control panel
     let mut time_selected = 0.0;                                    //Value of elapsed_time when the currently selected image was selected
-    let mut pics_per_row: u32 = 3;                                  //Number of pictures in a row
+    let mut pics_per_row = 3;                                       //Number of pictures in a row
     let mut auto_scroll = false;                                    //Auto-scroll flag
     
     let mut selected_index = None;                                  //Index into open_images of which image is currently selected or None
-    let mut selected_image_tags = vec![false; tags.len()];
-
+    let mut selected_image_tags = vec![false; tags.len()];          //An array of which tags are selected for the selected image. Indexed by alphabetical order
     
     //Set up the thread for loading the image data from disk
     let (path_tx, path_rx) = mpsc::channel();                   //Channel for sending paths to the loader thread
@@ -238,7 +240,10 @@ fn main() {
         }
     });
 
+    //Struct of timing data
     let mut frame_timer = ozy::structs::FrameTimer::new();
+
+    //Main application loop
     while !window.should_close() {
         let delta_time = {
             let frame_instant = Instant::now();
@@ -259,6 +264,7 @@ fn main() {
                     window_size.y = y as u32;
                     imgui_io.display_size[0] = x as f32;
                     imgui_io.display_size[1] = y as f32;
+                    println!("New framebuffer size: ({}, {})", x, y);
                 }
                 WindowEvent::MouseButton (button, action, ..) => {
                     let idx = button as usize - MouseButton::Button1 as usize;
@@ -288,9 +294,7 @@ fn main() {
                         imgui_io.keys_down[key as usize] = false;
                     }
                 }
-                WindowEvent::Char(c) => {
-                    imgui_io.add_input_character(c);
-                }
+                WindowEvent::Char(c) => { imgui_io.add_input_character(c); }
                 WindowEvent::FileDrop(file_paths) => {
                     for path in file_paths {
                         let s = String::from(path.to_str().unwrap());
@@ -301,7 +305,7 @@ fn main() {
             }
         }
 
-        //Set mod keys for this frame
+        //Set modifier keys for this frame
         imgui_io.key_ctrl = imgui_io.keys_down[Key::LeftControl as usize] || imgui_io.keys_down[Key::RightControl as usize];
         imgui_io.key_shift = imgui_io.keys_down[Key::LeftShift as usize] || imgui_io.keys_down[Key::RightShift as usize];
         imgui_io.key_alt = imgui_io.keys_down[Key::LeftAlt as usize] || imgui_io.keys_down[Key::RightAlt as usize];        
@@ -309,17 +313,17 @@ fn main() {
         //Begin Imgui drawing
         let imgui_ui = imgui_context.frame();
 
-        //Receive images from the image loading thread
+        //Receive an image from the image loading thread
         if let Ok((image, path)) = openimage_rx.try_recv() {
             //Create the open image struct
             let mut open_image = OpenImage::from_imagedata(image, path);
 
             //Copy this image into IMAGE_DIRECTORY if it isn't already there
-            let new_path = format!("{}/{}", IMAGE_DIRECTORY, open_image.name);
+            let new_path = format!("{}/{}", image_directory, open_image.name);
             if !Path::new(&new_path).exists() {
                 //Copy the file to the new path
                 if let Err(e) = fs::copy(&open_image.orignal_path, &new_path) {
-                    println!("Error migrating image to {}: {}", IMAGE_DIRECTORY, e);
+                    println!("Error migrating image to {}: {}", image_directory, e);
                 }
             }
             
@@ -353,111 +357,19 @@ fn main() {
             loader_thread.images_in_flight -= 1;
         }
 
-        //Top menu
-        let menu_height = 50.0;
-        if let Some(token) = imgui::Window::new(im_str!("menu"))
-                             .position([0.0, 0.0], Condition::Always)
-                             .size([window_size.x as f32, menu_height], Condition::Always)
-                             .resizable(false)
-                             .collapsible(false)
-                             .title_bar(false)
-                             .begin(&imgui_ui) {
-
-            fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<usize>) {
-                *selected_image = None;
-                images.clear();                
-            }
-            
-            imgui_ui.set_next_item_width(dropdown_width);
-            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
-                clear_open_images(&mut open_images, &mut selected_index);
-
-                let mut statement = connection.prepare("
-                    SELECT path FROM images
-                    JOIN
-                    (SELECT image_id FROM image_tags
-                    WHERE image_tags.tag_id = (
-                            SELECT id FROM tags WHERE name=?
-                        ))
-                    WHERE id=image_id;
-                ").unwrap();
-                statement.bind(1, tags[selected_tag].to_str()).unwrap();
-                while let State::Row = statement.next().unwrap() {
-                    let s = statement.read::<String>(0).unwrap();
-                    let path = format!("{}/{}", IMAGE_DIRECTORY, s);
-                    loader_thread.queue_image(path);
-                }
-            }
-            imgui_ui.same_line(0.0);
-
-            //Slider for selecting how many images are in a row
-            imgui_ui.set_next_item_width(200.0);
-            imgui::Slider::new(im_str!("Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
-            imgui_ui.same_line(0.0);
-
-            //Button to spawn a file(s) selection dialogue for loading images
-            if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
-                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", IMAGE_DIRECTORY, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
-                    for path in image_paths {
-                        loader_thread.queue_image(path);
-                    }
-                }
-            }
-            imgui_ui.same_line(0.0);
-
-            let tagless_loaded = 200;
-            if imgui_ui.button(im_str!("Load tagless images"), [0.0, 32.0]) {
-                clear_open_images(&mut open_images, &mut selected_index);
-                let mut statement = connection.prepare("
-                    SELECT path FROM images
-                    JOIN
-                        (SELECT id AS im_id FROM images
-                        EXCEPT
-                        SELECT image_id from image_tags)
-                    WHERE id=im_id
-                ").unwrap();
-
-                let mut count = 0;
-                while let State::Row = statement.next().unwrap() {
-                    if count < tagless_loaded {
-                        let path = format!("{}/{}", IMAGE_DIRECTORY, statement.read::<String>(0).unwrap());
-                        loader_thread.queue_image(path);
-                        count += 1;
-                    }
-                }
-            }
-            imgui_ui.same_line(0.0);
-                                
-            if imgui_ui.button(im_str!("Close open images"), [0.0, 32.0]) {
-                clear_open_images(&mut open_images, &mut selected_index);
-            }
-            imgui_ui.same_line(0.0);
-                                
-            if imgui_ui.button(im_str!("Toggle scrolling"), [0.0, 32.0]) {
-                auto_scroll = !auto_scroll;
-            }
-            imgui_ui.same_line(0.0);
-            
-            //Button to close the program
-            if imgui_ui.button(&im_str!("Exit"), [0.0, 32.0]) {
-                window.set_should_close(true);
-            }
-
-            token.end(&imgui_ui);
-        }
-
         //Draw main window where images are displayed
         let mut focus_control_panel = false;    //Gets set if the user selected an image this frame
         if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
-                            .position([0.0, menu_height], Condition::Always)
-                            .size([window_size.x as f32, window_size.y as f32 - menu_height], Condition::Always)
+                            .position([0.0, 0.0], Condition::Always)
+                            .size([window_size.x as f32, window_size.y as f32], Condition::Always)
                             .resizable(false)
                             .collapsible(false)
                             .title_bar(false)
                             .horizontal_scrollbar(true)
-                            //.menu_bar(true)
+                            .menu_bar(true)
                             .begin(&imgui_ui) {
 
+            //Do auto scrolling
             if auto_scroll {
                 let dist = 200.0 * delta_time;
                 imgui_ui.set_scroll_y(imgui_ui.scroll_y() + dist);
@@ -466,10 +378,22 @@ fn main() {
                 }
             }
 
+            let columns_ratio = 2.0 / 10.0;
+            imgui_ui.columns(2, im_str!("main_columns"), false);
+            imgui_ui.set_current_column_width(window_size.x as f32 * (1.0 - columns_ratio));
+
+            if let Some(menu_token) = imgui_ui.begin_menu_bar() {
+                if MenuItem::new(im_str!("File")).build(&imgui_ui) {
+                    
+                }
+
+                menu_token.end(&imgui_ui);
+            }
+
             //Drawing each open_image as an imgui::ImageButton
             for i in 0..open_images.len() {
                 let im = &open_images[i];
-                let max_width = window_size.x as f32 / pics_per_row as f32 - 24.0;
+                let max_width = (window_size.x as f32 / pics_per_row as f32 - 24.0) * (1.0 - columns_ratio);
                 let factor = max_width as f32 / im.width as f32;
 
                 //Color the selected image
@@ -502,6 +426,76 @@ fn main() {
                 imgui_ui.same_line(0.0);
                 if i as u32 % pics_per_row == pics_per_row - 1 {
                     imgui_ui.new_line();
+                }
+            }            
+
+            //Specify side panel
+            const Y_PADDING: f32 = 27.0;
+            imgui_ui.next_column();
+            imgui_ui.set_cursor_pos([imgui_ui.cursor_pos()[0], imgui_ui.scroll_y() + Y_PADDING]);
+            imgui_ui.set_current_column_width(window_size.x as f32 * columns_ratio);
+            
+            //Button to spawn a file(s) selection dialogue for loading images
+            if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", image_directory, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                    for path in image_paths {
+                        loader_thread.queue_image(path);
+                    }
+                }
+            }
+
+            let tagless_loaded = 200;
+            if imgui_ui.button(im_str!("Load tagless images"), [0.0, 32.0]) {
+                clear_open_images(&mut open_images, &mut selected_index);
+                let mut statement = connection.prepare("
+                    SELECT path FROM images
+                    JOIN
+                        (SELECT id AS im_id FROM images
+                        EXCEPT
+                        SELECT image_id from image_tags)
+                    WHERE id=im_id ORDER BY random();
+                ").unwrap();
+
+                let mut count = 0;
+                while let State::Row = statement.next().unwrap() {
+                    if count < tagless_loaded {
+                        let path = format!("{}/{}", image_directory, statement.read::<String>(0).unwrap());
+                        loader_thread.queue_image(path);
+                        count += 1;
+                    }
+                }
+            }
+                                
+            if imgui_ui.button(im_str!("Close open images"), [0.0, 32.0]) {
+                clear_open_images(&mut open_images, &mut selected_index);
+            }
+                                
+            if imgui_ui.button(im_str!("Toggle auto-scrolling"), [0.0, 32.0]) {
+                auto_scroll = !auto_scroll;
+            }
+
+            //Slider for selecting how many images are in a row
+            imgui_ui.set_next_item_width(200.0);
+            imgui::Slider::new(im_str!("Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
+
+            imgui_ui.set_next_item_width(dropdown_width);
+            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
+                clear_open_images(&mut open_images, &mut selected_index);
+
+                let mut statement = connection.prepare("
+                    SELECT path FROM images
+                    JOIN
+                    (SELECT image_id FROM image_tags
+                    WHERE image_tags.tag_id = (
+                            SELECT id FROM tags WHERE name=?
+                        ))
+                    WHERE id=image_id ORDER BY random();
+                ").unwrap();
+                statement.bind(1, tags[selected_tag].to_str()).unwrap();
+                while let State::Row = statement.next().unwrap() {
+                    let s = statement.read::<String>(0).unwrap();
+                    let path = format!("{}/{}", image_directory, s);
+                    loader_thread.queue_image(path);
                 }
             }
 
@@ -562,11 +556,16 @@ fn main() {
                         close_image(image, &mut to_remove, &mut selected_index);
                         delete_image(&im.orignal_path);
 
-                        let std_path = format!("{}/{}", IMAGE_DIRECTORY, im.name);
+                        let std_path = format!("{}/{}", image_directory, im.name);
                         if Path::new(&std_path) != Path::new(&im.orignal_path) {
                             delete_image(&std_path);
                         }
                     }
+                }
+                imgui_ui.same_line(0.0);
+
+                if imgui_ui.button(im_str!("Copy path to clipboard"), [0.0, 32.0]) {
+                    imgui_ui.set_clipboard_text(&im_str!("{}", im.orignal_path));
                 }
 
                 imgui_ui.separator();
@@ -603,9 +602,9 @@ fn main() {
 
                 imgui_ui.text(im_str!("Tag selection:"));
 
-                
+                //Drawing a checkbox per registered tag
                 let tags_per_column = 20;
-                let column_count = tags.len() / tags_per_column + 1;
+                let column_count = f32::ceil(tags.len() as f32 / tags_per_column as f32 + 1.0) as u32; //I'm a wizard for this lmao
                 imgui_ui.columns(column_count as i32, im_str!("Tag selection"), false);                
                 let mut to_remove = None;
                 for i in 0..tags.len() {
@@ -656,9 +655,8 @@ fn main() {
 
         //Rendering Dear IMGUI
         unsafe {
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::Clear(gl::COLOR_BUFFER_BIT);            
             gl::Viewport(0, 0, window_size.x as GLint, window_size.y as GLint);
-            gl::UseProgram(imgui_program);
             glutil::bind_matrix4(imgui_program, "projection", &clip_from_screen(window_size));
             {
                 let draw_data = imgui_ui.render();

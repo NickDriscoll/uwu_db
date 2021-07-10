@@ -5,8 +5,8 @@ in vec4 f_color;
 
 out vec4 frag_color;
 
-uniform sampler2D font_atlas;
+uniform sampler2D tex;  //Not _necessarily_ a font atlas
 
 void main() {
-    frag_color = f_color * texture(font_atlas, f_uv);
+    frag_color = f_color * texture(tex, f_uv);
 }
