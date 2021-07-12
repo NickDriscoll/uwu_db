@@ -67,8 +67,8 @@ fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<us
 
 fn main() {
     let mut window_size = glm::vec2(1280, 720);
-    let image_directory = "L:/images/good";
-    //const IMAGE_DIRECTORY: &str = "C:/Users/Nick/Pictures/images";
+    let mut image_directory = String::from("L:/images/good");
+    //let image_directory = "C:/Users/Nick/Pictures/images";
 
     //Init glfw and create the window
     let mut glfw = match glfw::init(glfw::FAIL_ON_ERRORS) {
@@ -182,11 +182,14 @@ fn main() {
         }
     }
 
-    //Open a connection to the database
-    let db_name = "uwu.db";
-    //let db_name = "my_images.db";
-    let connection = if !Path::new(db_name).exists() {
-        let con = sqlite::open(db_name).unwrap();
+    
+    let db_path = "uwu.db";
+    let mut connection: Option<sqlite::Connection> = None; //Connection to the database    
+    let mut tags = Vec::new(); //Fetch tags from database
+    let mut selected_image_tags = vec![false; tags.len()];          //An array of which tags are selected for the selected image. Indexed by alphabetical order
+
+    connection = if !Path::new(&db_path).exists() {
+        let con = sqlite::open(db_path).unwrap();
         
         //Initialize the tables
         con.execute(
@@ -197,27 +200,34 @@ fn main() {
             "
         ).unwrap();
         
-        con
-    } else { sqlite::open(db_name).unwrap() };
+        Some(con)
+    } else { Some(sqlite::open(db_path).unwrap()) };
 
     //Fetch tags from database
-    let mut tags = {
-        let mut tag_statement = connection.prepare(
-            "
-            SELECT name FROM tags ORDER BY name;
-            "
-        ).unwrap();
+    tags = match &connection {
+        Some(con) => {
+            let mut tag_statement = con.prepare(
+                "
+                SELECT name FROM tags ORDER BY name;
+                "
+            ).unwrap();
 
-        //Convert to imgui::ImString
-        let mut ts = Vec::new();
-        while let State::Row = tag_statement.next().unwrap() {
-            let the_string = tag_statement.read::<String>(0).unwrap();
-            ts.push(im_str!("{}", the_string));
+            //Convert to imgui::ImString
+            let mut ts = Vec::new();
+            while let State::Row = tag_statement.next().unwrap() {
+                let the_string = tag_statement.read::<String>(0).unwrap();
+                ts.push(im_str!("{}", the_string));
+            }
+            ts
         }
-        ts
+        None => {
+            Vec::new()
+        }
     };
 
-    let dropdown_width = 150.0;                                     //Width of dropdown boxes
+    selected_image_tags = vec![false; tags.len()];
+
+
     let mut open_images: Vec<OpenImage> = vec![];                   //Array of structs containing data for each currently open image in the program
     let mut new_tag_buffer = imgui::ImString::with_capacity(256);   //Buffer for the tag name input box
     let mut selected_tag = 0;                                       //Index into tags filter dropdown
@@ -226,7 +236,6 @@ fn main() {
     let mut auto_scroll = false;                                    //Auto-scroll flag
     
     let mut selected_index = None;                                  //Index into open_images of which image is currently selected or None
-    let mut selected_image_tags = vec![false; tags.len()];          //An array of which tags are selected for the selected image. Indexed by alphabetical order
     
     //Set up the thread for loading the image data from disk
     let (path_tx, path_rx) = mpsc::channel();                   //Channel for sending paths to the loader thread
@@ -264,7 +273,6 @@ fn main() {
                     window_size.y = y as u32;
                     imgui_io.display_size[0] = x as f32;
                     imgui_io.display_size[1] = y as f32;
-                    println!("New framebuffer size: ({}, {})", x, y);
                 }
                 WindowEvent::MouseButton (button, action, ..) => {
                     let idx = button as usize - MouseButton::Button1 as usize;
@@ -327,30 +335,32 @@ fn main() {
                 }
             }
             
-            //Insert this image into the database if it doesn't already exist
-            while let Err(e) = connection.execute(format!(
-                "
-                INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
-                ", open_image.name
-            )) {
-                println!("{}", e);
-            }
+            if let Some(con) = &connection {
+                //Insert this image into the database if it doesn't already exist
+                while let Err(e) = con.execute(format!(
+                    "
+                    INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
+                    ", open_image.name
+                )) {
+                    println!("{}", e);
+                }
 
-            //Retrieve all tags for this image from the DB
-            let mut tag_statement = connection.prepare("
-                SELECT name FROM tags
-                JOIN
-                (SELECT tag_id FROM image_tags
-                WHERE image_tags.image_id = (
-                        SELECT id FROM images WHERE path=?
-                    ))
-                WHERE id=tag_id ORDER BY name;
-            ").unwrap();
-            tag_statement.bind(1, &*open_image.name).unwrap();
+                //Retrieve all tags for this image from the DB
+                let mut tag_statement = con.prepare("
+                    SELECT name FROM tags
+                    JOIN
+                    (SELECT tag_id FROM image_tags
+                    WHERE image_tags.image_id = (
+                            SELECT id FROM images WHERE path=?
+                        ))
+                    WHERE id=tag_id ORDER BY name;
+                ").unwrap();
+                tag_statement.bind(1, &*open_image.name).unwrap();
 
-            //Push each tag into the image's tags array
-            while let State::Row = tag_statement.next().unwrap() {
-                open_image.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
+                //Push each tag into the image's tags array
+                while let State::Row = tag_statement.next().unwrap() {
+                    open_image.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
+                }
             }
 
             open_images.push(open_image);
@@ -358,7 +368,6 @@ fn main() {
         }
 
         //Draw main window where images are displayed
-        let mut focus_control_panel = false;    //Gets set if the user selected an image this frame
         if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
                             .position([0.0, 0.0], Condition::Always)
                             .size([window_size.x as f32, window_size.y as f32], Condition::Always)
@@ -378,22 +387,73 @@ fn main() {
                 }
             }
 
-            let columns_ratio = 2.0 / 10.0;
+            let side_panel_width = 200.0;
             imgui_ui.columns(2, im_str!("main_columns"), false);
-            imgui_ui.set_current_column_width(window_size.x as f32 * (1.0 - columns_ratio));
+            imgui_ui.set_current_column_width(window_size.x as f32 - side_panel_width);
 
             if let Some(menu_token) = imgui_ui.begin_menu_bar() {
-                if MenuItem::new(im_str!("File")).build(&imgui_ui) {
-                    
+                if let Some(file_token) = imgui_ui.begin_menu(im_str!("File"), true) {
+                    if MenuItem::new(im_str!("Open database")).build(&imgui_ui) {
+                        if let Some(db_path) = tfd::open_file_dialog("Open database", "", Some((&["*.db"], "database"))) {
+                            if let Some(dir) = tfd::select_folder_dialog("Open image directory", "") {
+                                image_directory = dir;
+                            }
+
+                            connection = if !Path::new(&db_path).exists() {
+                                let con = sqlite::open(db_path).unwrap();
+                                
+                                //Initialize the tables
+                                con.execute(
+                                    "
+                                    CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
+                                    CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
+                                    CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
+                                    "
+                                ).unwrap();
+                                
+                                Some(con)
+                            } else { Some(sqlite::open(db_path).unwrap()) };
+
+                            //Fetch tags from database
+                            tags = match &connection {
+                                Some(con) => {
+                                    let mut tag_statement = con.prepare(
+                                        "
+                                        SELECT name FROM tags ORDER BY name;
+                                        "
+                                    ).unwrap();
+
+                                    //Convert to imgui::ImString
+                                    let mut ts = Vec::new();
+                                    while let State::Row = tag_statement.next().unwrap() {
+                                        let the_string = tag_statement.read::<String>(0).unwrap();
+                                        ts.push(im_str!("{}", the_string));
+                                    }
+                                    ts
+                                }
+                                None => {
+                                    Vec::new()
+                                }
+                            };
+
+                            selected_image_tags = vec![false; tags.len()];
+                        }
+                    }
+
+                    if MenuItem::new(im_str!("Exit")).build(&imgui_ui) {
+                        window.set_should_close(true);
+                    }
+
+                    file_token.end(&imgui_ui);
                 }
 
                 menu_token.end(&imgui_ui);
             }
 
             //Drawing each open_image as an imgui::ImageButton
+            let max_width = (window_size.x as f32 - side_panel_width) / pics_per_row as f32 - 24.0;
             for i in 0..open_images.len() {
                 let im = &open_images[i];
-                let max_width = (window_size.x as f32 / pics_per_row as f32 - 24.0) * (1.0 - columns_ratio);
                 let factor = max_width as f32 / im.width as f32;
 
                 //Color the selected image
@@ -418,7 +478,6 @@ fn main() {
 									.build(&imgui_ui) {
                     selected_index = Some(i);
                     time_selected = frame_timer.elapsed_time;
-                    focus_control_panel = true;
 
                     //Compute selected_image_tags
                     recompute_selected_tags(&mut selected_image_tags, &tags, &im.tags);
@@ -433,11 +492,11 @@ fn main() {
             const Y_PADDING: f32 = 27.0;
             imgui_ui.next_column();
             imgui_ui.set_cursor_pos([imgui_ui.cursor_pos()[0], imgui_ui.scroll_y() + Y_PADDING]);
-            imgui_ui.set_current_column_width(window_size.x as f32 * columns_ratio);
+            imgui_ui.set_current_column_width(side_panel_width);
             
             //Button to spawn a file(s) selection dialogue for loading images
             if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
-                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", image_directory, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
+                if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", &image_directory, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
                         loader_thread.queue_image(path);
                     }
@@ -446,24 +505,33 @@ fn main() {
 
             let tagless_loaded = 200;
             if imgui_ui.button(im_str!("Load tagless images"), [0.0, 32.0]) {
-                clear_open_images(&mut open_images, &mut selected_index);
-                let mut statement = connection.prepare("
-                    SELECT path FROM images
-                    JOIN
-                        (SELECT id AS im_id FROM images
-                        EXCEPT
-                        SELECT image_id from image_tags)
-                    WHERE id=im_id ORDER BY random();
-                ").unwrap();
+                match &connection {
+                    Some(con) => {
+                        clear_open_images(&mut open_images, &mut selected_index);
+                        let mut statement = con.prepare("
+                            SELECT path FROM images
+                            JOIN
+                                (SELECT id AS im_id FROM images
+                                EXCEPT
+                                SELECT image_id from image_tags)
+                            WHERE id=im_id ORDER BY random();
+                        ").unwrap();
 
-                let mut count = 0;
-                while let State::Row = statement.next().unwrap() {
-                    if count < tagless_loaded {
-                        let path = format!("{}/{}", image_directory, statement.read::<String>(0).unwrap());
-                        loader_thread.queue_image(path);
-                        count += 1;
+                        let mut count = 0;
+                        while let State::Row = statement.next().unwrap() {
+                            if count < tagless_loaded {
+                                let path = format!("{}/{}", image_directory, statement.read::<String>(0).unwrap());
+                                loader_thread.queue_image(path);
+                                count += 1;
+                            }
+                        }
+                    }
+                    None => {
+                        tfd::message_box_ok("No loaded database", "One cannot load images from a database that is not there\n-Kanye", MessageBoxIcon::Error);
                     }
                 }
+
+                
             }
                                 
             if imgui_ui.button(im_str!("Close open images"), [0.0, 32.0]) {
@@ -475,27 +543,31 @@ fn main() {
             }
 
             //Slider for selecting how many images are in a row
-            imgui_ui.set_next_item_width(200.0);
-            imgui::Slider::new(im_str!("Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
+            imgui_ui.text(im_str!("Images per row"));
+            imgui_ui.set_next_item_width(side_panel_width - 50.0);
+            imgui::Slider::new(im_str!("###Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
 
-            imgui_ui.set_next_item_width(dropdown_width);
-            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
+            imgui_ui.text(im_str!("Active tag"));
+            imgui_ui.set_next_item_width(side_panel_width - 50.0);
+            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("###Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
                 clear_open_images(&mut open_images, &mut selected_index);
 
-                let mut statement = connection.prepare("
-                    SELECT path FROM images
-                    JOIN
-                    (SELECT image_id FROM image_tags
-                    WHERE image_tags.tag_id = (
-                            SELECT id FROM tags WHERE name=?
-                        ))
-                    WHERE id=image_id ORDER BY random();
-                ").unwrap();
-                statement.bind(1, tags[selected_tag].to_str()).unwrap();
-                while let State::Row = statement.next().unwrap() {
-                    let s = statement.read::<String>(0).unwrap();
-                    let path = format!("{}/{}", image_directory, s);
-                    loader_thread.queue_image(path);
+                if let Some(con) = &connection {
+                    let mut statement = con.prepare("
+                        SELECT path FROM images
+                        JOIN
+                        (SELECT image_id FROM image_tags
+                        WHERE image_tags.tag_id = (
+                                SELECT id FROM tags WHERE name=?
+                            ))
+                        WHERE id=image_id ORDER BY random();
+                    ").unwrap();
+                    statement.bind(1, tags[selected_tag].to_str()).unwrap();
+                    while let State::Row = statement.next().unwrap() {
+                        let s = statement.read::<String>(0).unwrap();
+                        let path = format!("{}/{}", image_directory, s);
+                        loader_thread.queue_image(path);
+                    }
                 }
             }
 
@@ -509,9 +581,9 @@ fn main() {
                 *selected_image = None;
             }
 
-            //Remove image from list of currently displayed images
-            fn close_image(image: usize, to_remove: &mut Option<usize>, selected_image: &mut Option<usize>) {
-                *to_remove = Some(image);                    
+            //Removes image from list of currently displayed images
+            fn close_image(to_remove: &mut bool, selected_image: &mut Option<usize>) {
+                *to_remove = true;                    
                 close_window(selected_image);
             }
 
@@ -522,13 +594,12 @@ fn main() {
             }
 
             let im = &mut open_images[image];       //Get mutable reference to the selected image
-            let mut to_remove = None;               //Gets set if the selected image is to be removed
+            let mut remove_this = false;            //Flag for if we want to close this image
 
             //Create control panel for manipulating the selected image
             if let Some(token) = imgui::Window::new(&im_str!("{}###control_panel", im.orignal_path))
                                  .collapsible(false)
                                  .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)   //We want it to spawn roughly in the middle of the screen the first time it's opened
-                                 .focused(focus_control_panel)
                                  .begin(&imgui_ui) {
 
                 //We want the control panel to close as soon as it loses focus
@@ -538,7 +609,7 @@ fn main() {
 
                 //Button to remove image from the current set
                 if imgui_ui.button(im_str!("Close this image"), [0.0, 32.0]) {
-                    close_image(image, &mut to_remove, &mut selected_index);
+                    close_image(&mut remove_this, &mut selected_index);
                 }
                 imgui_ui.same_line(0.0);
 
@@ -548,12 +619,14 @@ fn main() {
                     //Pop up confirmation dialogue for image deletion
                     if let YesNo::Yes = tfd::message_box_yes_no("Delete this image", &format!("You are about to permanently delete\n{}\nProceed?", im.name), MessageBoxIcon::Warning, YesNo::No) {
                         //Delete the image and its relationships from the database
-                        connection.execute(format!("
-                            DELETE FROM image_tags WHERE image_id=(SELECT id FROM images WHERE path=\"{}\");
-                            DELETE FROM images WHERE path=\"{}\";
-                        ", im.name, im.name)).unwrap();
+                        if let Some(con) = &connection {
+                            con.execute(format!("
+                                DELETE FROM image_tags WHERE image_id=(SELECT id FROM images WHERE path=\"{}\");
+                                DELETE FROM images WHERE path=\"{}\";
+                            ", im.name, im.name)).unwrap();
+                        }
                         
-                        close_image(image, &mut to_remove, &mut selected_index);
+                        close_image(&mut remove_this, &mut selected_index);
                         delete_image(&im.orignal_path);
 
                         let std_path = format!("{}/{}", image_directory, im.name);
@@ -578,22 +651,23 @@ fn main() {
 
                     //Do SQL
                     if !tags.contains(&new_tag) {
-                        connection.execute(format!(
-                            "
-                            INSERT OR IGNORE INTO tags (name) VALUES (\"{}\");
-                            INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
-                            INSERT OR IGNORE INTO image_tags VALUES (
-                                    (SELECT id FROM images WHERE path=\"{}\")
-                                ,   (SELECT id FROM tags WHERE name=\"{}\")
-                                );
-                            ", new_tag.to_str(), im.name, im.name, new_tag.to_str())
-                        ).unwrap();
+                        if let Some(con) = &connection {
+                            con.execute(format!(
+                                "
+                                INSERT OR IGNORE INTO tags (name) VALUES (\"{}\");
+                                INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
+                                INSERT OR IGNORE INTO image_tags VALUES (
+                                        (SELECT id FROM images WHERE path=\"{}\")
+                                    ,   (SELECT id FROM tags WHERE name=\"{}\")
+                                    );
+                                ", new_tag.to_str(), im.name, im.name, new_tag.to_str())
+                            ).unwrap();
+                        }
                     }
 
                     //Insert tags into appropriate arrays
                     insert_tag(&mut tags, &new_tag);
                     insert_tag(&mut im.tags, &new_tag);
-
 
                     selected_image_tags.push(false);
                     recompute_selected_tags(&mut selected_image_tags, &tags, &im.tags);
@@ -609,16 +683,17 @@ fn main() {
                 let mut to_remove = None;
                 for i in 0..tags.len() {
                     if imgui_ui.checkbox(&tags[i], &mut selected_image_tags[i]) {
-                        if selected_image_tags[i] {                            
-                            connection.execute(format!(
-                                "
-                                INSERT OR IGNORE INTO image_tags VALUES (
-                                    (SELECT id FROM images WHERE path=\"{}\")
-                                ,   (SELECT id FROM tags WHERE name=\"{}\")
-                                );
-                                ", im.name, tags[i].to_str()
-                            )).unwrap();
-
+                        if selected_image_tags[i] {
+                            if let Some(con) = &connection {
+                                con.execute(format!(
+                                    "
+                                    INSERT OR IGNORE INTO image_tags VALUES (
+                                        (SELECT id FROM images WHERE path=\"{}\")
+                                    ,   (SELECT id FROM tags WHERE name=\"{}\")
+                                    );
+                                    ", im.name, tags[i].to_str()
+                                )).unwrap();
+                            }
                             insert_tag(&mut im.tags, &tags[i]);
                         } else {
                             let image_tag_index = im.tags.binary_search(&tags[i]).unwrap();
@@ -633,23 +708,25 @@ fn main() {
 
                 //If we're removing a tag from an image
                 if let Some(idx) = to_remove {
-                    //Delete the relationship in the database
-                    connection.execute(format!("
-                        DELETE FROM image_tags WHERE image_id=(
-                            SELECT id FROM images WHERE path=\"{}\"
-                        ) AND tag_id=(
-                            SELECT id FROM tags WHERE name=\"{}\"
-                        )
-                    ", im.name, im.tags[idx].to_str())).unwrap();
-                    im.tags.remove(idx);
+                    //Delete the relationship in the database                    
+                    if let Some(con) = &connection {
+                        con.execute(format!("
+                            DELETE FROM image_tags WHERE image_id=(
+                                SELECT id FROM images WHERE path=\"{}\"
+                            ) AND tag_id=(
+                                SELECT id FROM tags WHERE name=\"{}\"
+                            )
+                        ", im.name, im.tags[idx].to_str())).unwrap();
+                        im.tags.remove(idx);
+                    }
                 }
 
                 token.end(&imgui_ui);
             }
 
             //Removing the selected image from the list
-            if let Some(index) = to_remove {
-                open_images.remove(index);
+            if remove_this {
+                open_images.remove(image);
             }
         }
 
