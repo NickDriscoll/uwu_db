@@ -67,7 +67,7 @@ fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<us
 
 fn main() {
     let mut window_size = glm::vec2(1280, 720);
-    let mut image_directory = String::from("L:/images/good");
+    let mut image_directory = String::from("E:/images/good");
     //let image_directory = "C:/Users/Nick/Pictures/images";
 
     //Init glfw and create the window
@@ -96,7 +96,7 @@ fn main() {
     gl::load_with(|symbol| window.get_proc_address(symbol));
 
     //Compile IMGUI shader
-    let imgui_program = match glutil::compile_program_from_files("shaders/imgui.vert", "shaders/imgui.frag") {
+    let imgui_program = match glutil::compile_program_from_files(&[(gl::VERTEX_SHADER, "shaders/imgui.vert"), (gl::FRAGMENT_SHADER, "shaders/imgui.frag")]) {
         Ok(shader) => { shader }
         Err(e) => {
             tfd::message_box_ok("GLSL compilation error", &format!("Unable to compile the GL shader:\n{}", e), MessageBoxIcon::Error);
@@ -173,7 +173,7 @@ fn main() {
             let mut tex = 0;
             gl::GenTextures(1, &mut tex);
             gl::BindTexture(gl::TEXTURE_2D, tex);            
-            glutil::apply_texture_parameters(&tex_params);
+            glutil::apply_texture_parameters(gl::TEXTURE_2D, &tex_params);
             gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as GLsizei, font_atlas.width as GLsizei, font_atlas.height as GLsizei, 0, gl::RGBA, gl::UNSIGNED_BYTE, font_atlas.data.as_ptr() as _);
             atlas.tex_id = TextureId::new(tex as usize);
         }
@@ -183,47 +183,9 @@ fn main() {
     }
 
     
-    let db_path = "uwu.db";
     let mut connection: Option<sqlite::Connection> = None; //Connection to the database    
     let mut tags = Vec::new(); //Fetch tags from database
     let mut selected_image_tags = vec![false; tags.len()];          //An array of which tags are selected for the selected image. Indexed by alphabetical order
-
-    connection = if !Path::new(&db_path).exists() {
-        let con = sqlite::open(db_path).unwrap();
-        
-        //Initialize the tables
-        con.execute(
-            "
-            CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
-            CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
-            CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
-            "
-        ).unwrap();
-        
-        Some(con)
-    } else { Some(sqlite::open(db_path).unwrap()) };
-
-    //Fetch tags from database
-    tags = match &connection {
-        Some(con) => {
-            let mut tag_statement = con.prepare(
-                "
-                SELECT name FROM tags ORDER BY name;
-                "
-            ).unwrap();
-
-            //Convert to imgui::ImString
-            let mut ts = Vec::new();
-            while let State::Row = tag_statement.next().unwrap() {
-                let the_string = tag_statement.read::<String>(0).unwrap();
-                ts.push(im_str!("{}", the_string));
-            }
-            ts
-        }
-        None => {
-            Vec::new()
-        }
-    };
 
     selected_image_tags = vec![false; tags.len()];
 
@@ -264,7 +226,6 @@ fn main() {
 
         //This section is mostly just passing window events into Dear Imgui
         let imgui_io = imgui_context.io_mut();      //Getting reference to the io data struct
-        glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
             match event {
                 WindowEvent::Close => { window.set_should_close(true); }
@@ -331,7 +292,7 @@ fn main() {
             if !Path::new(&new_path).exists() {
                 //Copy the file to the new path
                 if let Err(e) = fs::copy(&open_image.orignal_path, &new_path) {
-                    println!("Error migrating image to {}: {}", image_directory, e);
+                    println!("Error migrating {} to {}: {}", open_image.orignal_path, image_directory, e);
                 }
             }
             
@@ -381,9 +342,11 @@ fn main() {
             //Do auto scrolling
             if auto_scroll {
                 let dist = 200.0 * delta_time;
-                imgui_ui.set_scroll_y(imgui_ui.scroll_y() + dist);
-                if imgui_ui.scroll_y() >= imgui_ui.scroll_max_y() {
+                let new_scroll = imgui_ui.scroll_y() + dist;
+                if new_scroll >= imgui_ui.scroll_max_y() {
                     imgui_ui.set_scroll_y(0.0);
+                } else {
+                    imgui_ui.set_scroll_y(imgui_ui.scroll_y() + dist);
                 }
             }
 
@@ -393,11 +356,30 @@ fn main() {
 
             if let Some(menu_token) = imgui_ui.begin_menu_bar() {
                 if let Some(file_token) = imgui_ui.begin_menu(im_str!("File"), true) {
+                    if MenuItem::new(im_str!("New database")).build(&imgui_ui) {
+                        if let Some(dir_path) = tfd::select_folder_dialog("Image location", ".") {
+                            tags.clear();
+                            image_directory = dir_path;
+                            connection =  {
+                                let con = sqlite::open(format!("{}/images.db", image_directory)).unwrap();
+                                
+                                //Initialize the tables
+                                con.execute(
+                                    "
+                                    CREATE TABLE images (id INTEGER, path STRING NOT NULL UNIQUE, PRIMARY KEY (id));
+                                    CREATE TABLE tags (id INTEGER, name STRING NOT NULL UNIQUE, PRIMARY KEY (id));
+                                    CREATE TABLE image_tags (image_id INTEGER, tag_id INTEGER);
+                                    "
+                                ).unwrap();
+
+                                Some(con)
+                            };
+                        }
+                    }
+
                     if MenuItem::new(im_str!("Open database")).build(&imgui_ui) {
                         if let Some(db_path) = tfd::open_file_dialog("Open database", "", Some((&["*.db"], "database"))) {
-                            if let Some(dir) = tfd::select_folder_dialog("Open image directory", "") {
-                                image_directory = dir;
-                            }
+                            image_directory = String::from(Path::new(&db_path).parent().unwrap().to_str().unwrap());
 
                             connection = if !Path::new(&db_path).exists() {
                                 let con = sqlite::open(db_path).unwrap();
@@ -551,6 +533,7 @@ fn main() {
             imgui_ui.set_next_item_width(side_panel_width - 50.0);
             if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("###Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
                 clear_open_images(&mut open_images, &mut selected_index);
+                imgui_ui.set_scroll_y(0.0);
 
                 if let Some(con) = &connection {
                     let mut statement = con.prepare("
@@ -644,33 +627,37 @@ fn main() {
                 imgui_ui.separator();
 
                 //Create a text input field for entering tag names into
-                imgui::InputText::new(&imgui_ui, im_str!("New tag entry"), &mut new_tag_buffer).build();
+                imgui::InputText::new(&imgui_ui, im_str!("Create a new tag"), &mut new_tag_buffer).build();
                 if new_tag_buffer.to_str().len() > 0 && imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
                     let new_tag = new_tag_buffer.clone();       //Make a copy of the text in the input field
                     new_tag_buffer.clear();                     //Clear the input field                    
 
-                    //Do SQL
+                    //Do nothing if this tag already exists
                     if !tags.contains(&new_tag) {
-                        if let Some(con) = &connection {
-                            con.execute(format!(
-                                "
-                                INSERT OR IGNORE INTO tags (name) VALUES (\"{}\");
-                                INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
-                                INSERT OR IGNORE INTO image_tags VALUES (
-                                        (SELECT id FROM images WHERE path=\"{}\")
-                                    ,   (SELECT id FROM tags WHERE name=\"{}\")
-                                    );
-                                ", new_tag.to_str(), im.name, im.name, new_tag.to_str())
-                            ).unwrap();
+                        match &connection {
+                            Some(con) => {
+                                //Insert tags into appropriate arrays
+                                insert_tag(&mut tags, &new_tag);
+                                insert_tag(&mut im.tags, &new_tag);
+            
+                                selected_image_tags.push(false);
+                                recompute_selected_tags(&mut selected_image_tags, &tags, &im.tags);
+
+                                //Do SQL
+                                con.execute(format!(
+                                    "
+                                    INSERT OR IGNORE INTO tags (name) VALUES (\"{}\");
+                                    INSERT OR IGNORE INTO images (path) VALUES (\"{}\");
+                                    INSERT OR IGNORE INTO image_tags VALUES (
+                                            (SELECT id FROM images WHERE path=\"{}\")
+                                        ,   (SELECT id FROM tags WHERE name=\"{}\")
+                                        );
+                                    ", new_tag.to_str(), im.name, im.name, new_tag.to_str())
+                                ).unwrap();
+                            }
+                            None => { tfd::message_box_ok("Saving with no db", "You need to open a database before you can do this", MessageBoxIcon::Error); }
                         }
                     }
-
-                    //Insert tags into appropriate arrays
-                    insert_tag(&mut tags, &new_tag);
-                    insert_tag(&mut im.tags, &new_tag);
-
-                    selected_image_tags.push(false);
-                    recompute_selected_tags(&mut selected_image_tags, &tags, &im.tags);
                 }
                 imgui_ui.separator();
 
@@ -684,15 +671,18 @@ fn main() {
                 for i in 0..tags.len() {
                     if imgui_ui.checkbox(&tags[i], &mut selected_image_tags[i]) {
                         if selected_image_tags[i] {
-                            if let Some(con) = &connection {
-                                con.execute(format!(
-                                    "
-                                    INSERT OR IGNORE INTO image_tags VALUES (
-                                        (SELECT id FROM images WHERE path=\"{}\")
-                                    ,   (SELECT id FROM tags WHERE name=\"{}\")
-                                    );
-                                    ", im.name, tags[i].to_str()
-                                )).unwrap();
+                            match &connection {
+                                Some(con) => {
+                                    con.execute(format!(
+                                        "
+                                        INSERT OR IGNORE INTO image_tags VALUES (
+                                            (SELECT id FROM images WHERE path=\"{}\")
+                                        ,   (SELECT id FROM tags WHERE name=\"{}\")
+                                        );
+                                        ", im.name, tags[i].to_str()
+                                    )).unwrap();
+                                }
+                                None => { tfd::message_box_ok("Saving with no db", "You need to open a database before you can do this", MessageBoxIcon::Error); }
                             }
                             insert_tag(&mut im.tags, &tags[i]);
                         } else {
@@ -763,7 +753,7 @@ fn main() {
                         for command in list.commands() {
                             match command {
                                 DrawCmd::Elements {count, cmd_params} => {
-                                    gl::BindVertexArray(imgui_vao);
+                                    gl::BindVertexArray(imgui_vao.vao);
                                     gl::ActiveTexture(gl::TEXTURE0);
                                     gl::BindTexture(gl::TEXTURE_2D, cmd_params.texture_id.id() as GLuint);
                                     gl::Scissor(cmd_params.clip_rect[0] as GLint,
@@ -779,12 +769,9 @@ fn main() {
                         }
                         
                         //Free the vertex and index buffers
-                        let mut bufs = [0, 0];
-                        gl::GetIntegerv(gl::ARRAY_BUFFER_BINDING, &mut bufs[0]);
-                        gl::GetIntegerv(gl::ELEMENT_ARRAY_BUFFER_BINDING, &mut bufs[1]);
-                        let bufs = [bufs[0] as GLuint, bufs[1] as GLuint];
+                        let bufs = [imgui_vao.vbo, imgui_vao.ebo];
                         gl::DeleteBuffers(2, &bufs[0]);
-                        gl::DeleteVertexArrays(1, &imgui_vao);
+                        gl::DeleteVertexArrays(1, &imgui_vao.vao);
                     }
                 }
             }
@@ -792,5 +779,8 @@ fn main() {
 
         //Present the drawn frame before returning to the beginning of the loop
         window.swap_buffers();
+
+        //glfw.wait_events_timeout(0.1);
+        glfw.poll_events();
     }
 }
