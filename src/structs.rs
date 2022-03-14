@@ -8,7 +8,7 @@ use crate::*;
 
 //Stores all the state required for an image the program has loaded
 pub struct OpenImage {
-    pub name: String,				//Just the filename woth extension
+    pub name: String,				//Just the filename without extension
     pub orignal_path: String,       //The original path the image was opened from
     pub tags: Vec<ImString>,		//Array of tags
     pub gl_name: GLuint,			//GL texture

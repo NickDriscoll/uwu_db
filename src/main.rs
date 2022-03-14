@@ -53,10 +53,7 @@ fn send_or_error<T>(tx: &mpsc::Sender<T>, item: T) {
 
 fn recompute_selected_tags(selected_image_tags: &mut Vec<bool>, tags: &Vec<ImString>, image_tags: &Vec<ImString>) {    
     for i in 0..tags.len() {
-        selected_image_tags[i] = false;
-        if image_tags.contains(&tags[i]) {
-            selected_image_tags[i] = true;
-        }
+        selected_image_tags[i] = image_tags.contains(&tags[i]);
     }
 }
 
@@ -68,7 +65,6 @@ fn clear_open_images(images: &mut Vec<OpenImage>, selected_image: &mut Option<us
 fn main() {
     let mut window_size = glm::vec2(1280, 720);
     let mut image_directory = String::from("E:/images/good");
-    //let image_directory = "C:/Users/Nick/Pictures/images";
 
     //Init glfw and create the window
     let mut glfw = match glfw::init(glfw::FAIL_ON_ERRORS) {
@@ -191,11 +187,12 @@ fn main() {
 
 
     let mut open_images: Vec<OpenImage> = vec![];                   //Array of structs containing data for each currently open image in the program
-    let mut new_tag_buffer = imgui::ImString::with_capacity(256);   //Buffer for the tag name input box
+    let mut new_tag_buffer = String::with_capacity(256);   //Buffer for the tag name input box
     let mut selected_tag = 0;                                       //Index into tags filter dropdown
     let mut time_selected = 0.0;                                    //Value of elapsed_time when the currently selected image was selected
     let mut pics_per_row = 3;                                       //Number of pictures in a row
     let mut auto_scroll = false;                                    //Auto-scroll flag
+    let mut auto_scroll_speed = 200.0;
     
     let mut selected_index = None;                                  //Index into open_images of which image is currently selected or None
     
@@ -216,13 +213,7 @@ fn main() {
 
     //Main application loop
     while !window.should_close() {
-        let delta_time = {
-            let frame_instant = Instant::now();
-            let dur = frame_instant.duration_since(frame_timer.last_frame_instant);
-            frame_timer.last_frame_instant = frame_instant;
-            dur.as_secs_f32()
-        };
-        frame_timer.elapsed_time += delta_time;
+        frame_timer.update();
 
         //This section is mostly just passing window events into Dear Imgui
         let imgui_io = imgui_context.io_mut();      //Getting reference to the io data struct
@@ -274,7 +265,7 @@ fn main() {
             }
         }
 
-        //Set modifier keys for this frame
+        //Set modifier keys
         imgui_io.key_ctrl = imgui_io.keys_down[Key::LeftControl as usize] || imgui_io.keys_down[Key::RightControl as usize];
         imgui_io.key_shift = imgui_io.keys_down[Key::LeftShift as usize] || imgui_io.keys_down[Key::RightShift as usize];
         imgui_io.key_alt = imgui_io.keys_down[Key::LeftAlt as usize] || imgui_io.keys_down[Key::RightAlt as usize];        
@@ -329,7 +320,7 @@ fn main() {
         }
 
         //Draw main window where images are displayed
-        if let Some(token) = imgui::Window::new(im_str!("uwu_db"))
+        if let Some(token) = imgui::Window::new("uwu_db")
                             .position([0.0, 0.0], Condition::Always)
                             .size([window_size.x as f32, window_size.y as f32], Condition::Always)
                             .resizable(false)
@@ -341,7 +332,7 @@ fn main() {
 
             //Do auto scrolling
             if auto_scroll {
-                let dist = 200.0 * delta_time;
+                let dist = auto_scroll_speed * frame_timer.delta_time;
                 let new_scroll = imgui_ui.scroll_y() + dist;
                 if new_scroll >= imgui_ui.scroll_max_y() {
                     imgui_ui.set_scroll_y(0.0);
@@ -351,12 +342,12 @@ fn main() {
             }
 
             let side_panel_width = 200.0;
-            imgui_ui.columns(2, im_str!("main_columns"), false);
+            imgui_ui.columns(2, "main_columns", false);
             imgui_ui.set_current_column_width(window_size.x as f32 - side_panel_width);
 
             if let Some(menu_token) = imgui_ui.begin_menu_bar() {
-                if let Some(file_token) = imgui_ui.begin_menu(im_str!("File"), true) {
-                    if MenuItem::new(im_str!("New database")).build(&imgui_ui) {
+                if let Some(file_token) = imgui_ui.begin_menu("File") {
+                    if MenuItem::new("New database").build(&imgui_ui) {
                         if let Some(dir_path) = tfd::select_folder_dialog("Image location", ".") {
                             tags.clear();
                             image_directory = dir_path;
@@ -377,7 +368,7 @@ fn main() {
                         }
                     }
 
-                    if MenuItem::new(im_str!("Open database")).build(&imgui_ui) {
+                    if MenuItem::new("Open database").build(&imgui_ui) {
                         if let Some(db_path) = tfd::open_file_dialog("Open database", "", Some((&["*.db"], "database"))) {
                             image_directory = String::from(Path::new(&db_path).parent().unwrap().to_str().unwrap());
 
@@ -422,14 +413,14 @@ fn main() {
                         }
                     }
 
-                    if MenuItem::new(im_str!("Exit")).build(&imgui_ui) {
+                    if MenuItem::new("Exit").build(&imgui_ui) {
                         window.set_should_close(true);
                     }
 
-                    file_token.end(&imgui_ui);
+                    file_token.end();
                 }
 
-                menu_token.end(&imgui_ui);
+                menu_token.end();
             }
 
             //Drawing each open_image as an imgui::ImageButton
@@ -464,7 +455,7 @@ fn main() {
                     //Compute selected_image_tags
                     recompute_selected_tags(&mut selected_image_tags, &tags, &im.tags);
                 }
-                imgui_ui.same_line(0.0);
+                imgui_ui.same_line();
                 if i as u32 % pics_per_row == pics_per_row - 1 {
                     imgui_ui.new_line();
                 }
@@ -477,7 +468,7 @@ fn main() {
             imgui_ui.set_current_column_width(side_panel_width);
             
             //Button to spawn a file(s) selection dialogue for loading images
-            if imgui_ui.button(im_str!("Open image(s)"), [0.0, 32.0]) {
+            if imgui_ui.button_with_size("Open image(s)", [0.0, 32.0]) {
                 if let Some(image_paths) = tfd::open_file_dialog_multi("Open image", &image_directory, Some((&["*.png", "*.jpg"], ".png, .jpg"))) {
                     for path in image_paths {
                         loader_thread.queue_image(path);
@@ -485,8 +476,7 @@ fn main() {
                 }
             }
 
-            let tagless_loaded = 200;
-            if imgui_ui.button(im_str!("Load tagless images"), [0.0, 32.0]) {
+            if imgui_ui.button_with_size("Load tagless images", [0.0, 32.0]) {
                 match &connection {
                     Some(con) => {
                         clear_open_images(&mut open_images, &mut selected_index);
@@ -499,6 +489,7 @@ fn main() {
                             WHERE id=im_id ORDER BY random();
                         ").unwrap();
 
+                        let tagless_loaded = 200;
                         let mut count = 0;
                         while let State::Row = statement.next().unwrap() {
                             if count < tagless_loaded {
@@ -516,22 +507,18 @@ fn main() {
                 
             }
                                 
-            if imgui_ui.button(im_str!("Close open images"), [0.0, 32.0]) {
+            if imgui_ui.button_with_size("Close open images", [0.0, 32.0]) {
                 clear_open_images(&mut open_images, &mut selected_index);
-            }
-                                
-            if imgui_ui.button(im_str!("Toggle auto-scrolling"), [0.0, 32.0]) {
-                auto_scroll = !auto_scroll;
             }
 
             //Slider for selecting how many images are in a row
-            imgui_ui.text(im_str!("Images per row"));
+            imgui_ui.text("Images per row");
             imgui_ui.set_next_item_width(side_panel_width - 50.0);
-            imgui::Slider::new(im_str!("###Images per row")).range(RangeInclusive::new(1, 16)).build(&imgui_ui, &mut pics_per_row);
+            imgui::Slider::new("###Images per row", 1, 16).build(&imgui_ui, &mut pics_per_row);
 
-            imgui_ui.text(im_str!("Active tag"));
-            imgui_ui.set_next_item_width(side_panel_width - 50.0);
-            if loader_thread.images_in_flight == 0 && imgui::ComboBox::new(im_str!("###Active tag")).flags(ComboBoxFlags::HEIGHT_LARGE).build_simple_string(&imgui_ui, &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
+            imgui_ui.text("Active tag");
+            imgui_ui.set_next_item_width(side_panel_width - 50.0);            
+            if loader_thread.images_in_flight == 0 && imgui_ui.combo_simple_string("###Active tag", &mut selected_tag, imstr_ref_array(&tags).as_slice()) {
                 clear_open_images(&mut open_images, &mut selected_index);
                 imgui_ui.set_scroll_y(0.0);
 
@@ -553,12 +540,34 @@ fn main() {
                     }
                 }
             }
+            imgui_ui.separator();
 
-            token.end(&imgui_ui);
+            //imgui::Slider::new()
+            if imgui_ui.button_with_size("Toggle auto-scrolling", [0.0, 32.0]) {
+                auto_scroll = !auto_scroll;
+            }
+
+            if let Some(_) = selected_index {
+                
+                if let Some(token) = imgui::Window::new("uwu_db")
+                                     .position([0.0, 0.0], Condition::Always)
+                                     .size([window_size.x as f32, window_size.y as f32], Condition::Always)
+                                     .resizable(true)
+                                     .collapsible(false)
+                                     .title_bar(false)
+                                     .begin(&imgui_ui) {
+                    
+                    //                    
+                    
+                    token.end()
+                }
+            }
+
+            token.end();
         }
 
         //Image control panel window
-        if let Some(image) = selected_index {
+        if let Some(image_idx) = selected_index {
             //Close this control panel window
             fn close_window(selected_image: &mut Option<usize>) {
                 *selected_image = None;
@@ -576,13 +585,13 @@ fn main() {
                 }                
             }
 
-            let im = &mut open_images[image];       //Get mutable reference to the selected image
-            let mut remove_this = false;            //Flag for if we want to close this image
+            let im = &mut open_images[image_idx];       //Get mutable reference to the selected image
+            let mut removing_this = false;            //Flag for if we want to close this image
 
             //Create control panel for manipulating the selected image
             if let Some(token) = imgui::Window::new(&im_str!("{}###control_panel", im.orignal_path))
                                  .collapsible(false)
-                                 .position([(window_size.x / 2) as f32, (window_size.y / 2) as f32], Condition::Once)   //We want it to spawn roughly in the middle of the screen the first time it's opened
+                                 .position(imgui_ui.cursor_pos(), Condition::Once)   //We want it to spawn roughly in the middle of the screen the first time it's opened
                                  .begin(&imgui_ui) {
 
                 //We want the control panel to close as soon as it loses focus
@@ -591,13 +600,13 @@ fn main() {
                 }
 
                 //Button to remove image from the current set
-                if imgui_ui.button(im_str!("Close this image"), [0.0, 32.0]) {
-                    close_image(&mut remove_this, &mut selected_index);
+                if imgui_ui.button_with_size("Close this image", [0.0, 32.0]) {
+                    close_image(&mut removing_this, &mut selected_index);
                 }
-                imgui_ui.same_line(0.0);
+                imgui_ui.same_line();
 
                 //Create button for completely deleting image
-                if imgui_ui.button(im_str!("Delete this image"), [0.0, 32.0]) {
+                if imgui_ui.button_with_size("Delete this image", [0.0, 32.0]) {
 
                     //Pop up confirmation dialogue for image deletion
                     if let YesNo::Yes = tfd::message_box_yes_no("Delete this image", &format!("You are about to permanently delete\n{}\nProceed?", im.name), MessageBoxIcon::Warning, YesNo::No) {
@@ -609,7 +618,7 @@ fn main() {
                             ", im.name, im.name)).unwrap();
                         }
                         
-                        close_image(&mut remove_this, &mut selected_index);
+                        close_image(&mut removing_this, &mut selected_index);
                         delete_image(&im.orignal_path);
 
                         let std_path = format!("{}/{}", image_directory, im.name);
@@ -618,21 +627,22 @@ fn main() {
                         }
                     }
                 }
-                imgui_ui.same_line(0.0);
+                imgui_ui.same_line();
 
-                if imgui_ui.button(im_str!("Copy path to clipboard"), [0.0, 32.0]) {
+                if imgui_ui.button_with_size("Copy path to clipboard", [0.0, 32.0]) {
                     imgui_ui.set_clipboard_text(&im_str!("{}", im.orignal_path));
                 }
 
                 imgui_ui.separator();
 
                 //Create a text input field for entering tag names into
-                imgui::InputText::new(&imgui_ui, im_str!("Create a new tag"), &mut new_tag_buffer).build();
-                if new_tag_buffer.to_str().len() > 0 && imgui_ui.button(im_str!("Create tag and apply to image"), [0.0, 32.0]) {
+                imgui::InputText::new(&imgui_ui, "Create a new tag", &mut new_tag_buffer).build();
+                if new_tag_buffer.len() > 0 && imgui_ui.button_with_size("Create tag and apply to image", [0.0, 32.0]) {
                     let new_tag = new_tag_buffer.clone();       //Make a copy of the text in the input field
                     new_tag_buffer.clear();                     //Clear the input field                    
 
                     //Do nothing if this tag already exists
+                    let new_tag = new_tag.into();
                     if !tags.contains(&new_tag) {
                         match &connection {
                             Some(con) => {
@@ -661,12 +671,12 @@ fn main() {
                 }
                 imgui_ui.separator();
 
-                imgui_ui.text(im_str!("Tag selection:"));
+                imgui_ui.text("Tag selection:");
 
                 //Drawing a checkbox per registered tag
                 let tags_per_column = 20;
-                let column_count = f32::ceil(tags.len() as f32 / tags_per_column as f32 + 1.0) as u32; //I'm a wizard for this lmao
-                imgui_ui.columns(column_count as i32, im_str!("Tag selection"), false);                
+                let column_count = f32::ceil(tags.len() as f32 / tags_per_column as f32 + 1.0) as u32;
+                imgui_ui.columns(column_count as i32, "Tag selection", false);                
                 let mut to_remove = None;
                 for i in 0..tags.len() {
                     if imgui_ui.checkbox(&tags[i], &mut selected_image_tags[i]) {
@@ -711,12 +721,12 @@ fn main() {
                     }
                 }
 
-                token.end(&imgui_ui);
+                token.end();
             }
 
             //Removing the selected image from the list
-            if remove_this {
-                open_images.remove(image);
+            if removing_this {
+                open_images.remove(image_idx);
             }
         }
 
