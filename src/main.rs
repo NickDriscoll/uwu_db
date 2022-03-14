@@ -4,15 +4,13 @@ extern crate tinyfiledialogs as tfd;
 extern crate ozy_engine as ozy;
 
 use sqlite::State;
-use core::ops::RangeInclusive;
 use std::path::Path;
 use std::mem::size_of;
 use std::process::{exit};
 use std::{fs, thread};
-use std::time::{Duration, Instant};
 use std::sync::mpsc;
-use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowHint, WindowMode};
-use imgui::{ComboBox, ComboBoxFlags, Condition, DrawCmd, FontAtlasRefMut, ImageButton, ImStr, ImString, MenuItem, TextureId, WindowFocusedFlags, im_str};
+use glfw::{Action, Context, Key, MouseButton, WindowEvent, WindowMode};
+use imgui::{Condition, DrawCmd, FontAtlasRefMut, ImageButton, ImString, MenuItem, TextureId, WindowFocusedFlags};
 use ozy::glutil;
 use ozy::render::{clip_from_screen};
 use gl::types::*;
@@ -311,7 +309,7 @@ fn main() {
 
                 //Push each tag into the image's tags array
                 while let State::Row = tag_statement.next().unwrap() {
-                    open_image.tags.push(im_str!("{}", tag_statement.read::<String>(0).unwrap()));
+                    open_image.tags.push(tag_statement.read::<String>(0).unwrap().into());
                 }
             }
 
@@ -400,7 +398,7 @@ fn main() {
                                     let mut ts = Vec::new();
                                     while let State::Row = tag_statement.next().unwrap() {
                                         let the_string = tag_statement.read::<String>(0).unwrap();
-                                        ts.push(im_str!("{}", the_string));
+                                        ts.push(the_string.into());
                                     }
                                     ts
                                 }
@@ -589,7 +587,7 @@ fn main() {
             let mut removing_this = false;            //Flag for if we want to close this image
 
             //Create control panel for manipulating the selected image
-            if let Some(token) = imgui::Window::new(&im_str!("{}###control_panel", im.orignal_path))
+            if let Some(token) = imgui::Window::new(&format!("{}###control_panel", im.orignal_path))
                                  .collapsible(false)
                                  .position(imgui_ui.cursor_pos(), Condition::Once)   //We want it to spawn roughly in the middle of the screen the first time it's opened
                                  .begin(&imgui_ui) {
@@ -630,7 +628,7 @@ fn main() {
                 imgui_ui.same_line();
 
                 if imgui_ui.button_with_size("Copy path to clipboard", [0.0, 32.0]) {
-                    imgui_ui.set_clipboard_text(&im_str!("{}", im.orignal_path));
+                    imgui_ui.set_clipboard_text(&im.orignal_path);
                 }
 
                 imgui_ui.separator();
