@@ -538,9 +538,10 @@ fn main() {
                     }
                 }
             }
-            imgui_ui.separator();
 
-            //imgui::Slider::new()
+            imgui_ui.text("Scroll speed");
+            imgui_ui.set_next_item_width(side_panel_width - 50.0);
+            imgui::Slider::new("###Scroll speed", 150.0, 750.0).build(&imgui_ui, &mut auto_scroll_speed);
             if imgui_ui.button_with_size("Toggle auto-scrolling", [0.0, 32.0]) {
                 auto_scroll = !auto_scroll;
             }
