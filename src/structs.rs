@@ -8,7 +8,7 @@ use crate::*;
 
 //Stores all the state required for an image the program has loaded
 pub struct OpenImage {
-    pub name: String,				//Just the filename without extension
+    pub name: String,				//Just the filename with extension
     pub orignal_path: String,       //The original path the image was opened from
     pub tags: Vec<ImString>,		//Array of tags
     pub gl_name: GLuint,			//GL texture
@@ -23,16 +23,8 @@ impl OpenImage {
         let gl_name = unsafe { glutil::load_texture_from_data(image_data, &DEFAULT_TEX_PARAMS) };
         
         let name = {
-            let mut last_slash_index = 0;
-            let mut current_index = 0;
-            for c in path.chars() {
-                if c == '\\' || c == '/' {
-                    last_slash_index = current_index;
-                }
-                current_index += 1;
-            }
-
-            String::from(path.split_at(last_slash_index + 1).1)
+            let p = Path::new(&path);
+            String::from(p.file_name().unwrap().to_str().unwrap())
         };
 
         OpenImage {

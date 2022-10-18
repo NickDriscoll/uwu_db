@@ -509,6 +509,15 @@ fn main() {
                 clear_open_images(&mut open_images, &mut selected_index);
             }
 
+            if imgui_ui.button_with_size("Copy loaded to temp file", [0.0, 32.0]) {
+                if let Err(e) = std::fs::create_dir("./temp") {
+                    println!("{}", e);
+                }
+                for image in open_images.iter() {
+                    std::fs::copy(&image.orignal_path, format!("./temp/{}", image.name)).unwrap();
+                }
+            }
+
             //Slider for selecting how many images are in a row
             imgui_ui.text("Images per row");
             imgui_ui.set_next_item_width(side_panel_width - 50.0);
@@ -538,13 +547,12 @@ fn main() {
                     }
                 }
             }
+            imgui_ui.text(format!("{} images loaded.", open_images.len()));
 
             imgui_ui.text("Scroll speed");
             imgui_ui.set_next_item_width(side_panel_width - 50.0);
             imgui::Slider::new("###Scroll speed", 150.0, 750.0).build(&imgui_ui, &mut auto_scroll_speed);
-            if imgui_ui.button_with_size("Toggle auto-scrolling", [0.0, 32.0]) {
-                auto_scroll = !auto_scroll;
-            }
+            imgui_ui.checkbox("Auto-scrolling", &mut auto_scroll);
 
             if let Some(_) = selected_index {
                 
@@ -628,8 +636,13 @@ fn main() {
                 }
                 imgui_ui.same_line();
 
-                if imgui_ui.button_with_size("Copy path to clipboard", [0.0, 32.0]) {
-                    imgui_ui.set_clipboard_text(&im.orignal_path);
+                if imgui_ui.button_with_size("Copy to temp", [0.0, 32.0]) {
+                    if let Err(e) = std::fs::create_dir("./temp") {
+                        println!("{}", e);
+                    }
+                    if let Err(e) = std::fs::copy(&im.orignal_path, format!("./temp/{}", im.name)) {
+                        println!("{}", e);
+                    }
                 }
 
                 imgui_ui.separator();
@@ -719,6 +732,8 @@ fn main() {
                         im.tags.remove(idx);
                     }
                 }
+
+
 
                 token.end();
             }

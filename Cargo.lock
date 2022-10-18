@@ -569,6 +569,7 @@ dependencies = [
 [[package]]
 name = "ozy_engine"
 version = "0.1.0"
+source = "git+https://github.com/NickDriscoll/ozy_engine#f72911e1ff04e1aef09828c0ed30b2765034e771"
 dependencies = [
  "gl",
  "glfw",
